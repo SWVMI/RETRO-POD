@@ -4,7 +4,7 @@ const AUTH_ENDPOINT = "https://accounts.spotify.com/authorize";
 const TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token";
 const API_BASE = "https://api.spotify.com/v1";
 
-export const SPOTIFY_REDIRECT_URI = "http://127.0.0.1:8888/callback";
+export const SPOTIFY_REDIRECT_URI = "retropod://callback";
 export const SPOTIFY_WEB_REDIRECT_URI = typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}` : "";
 
 export const SPOTIFY_SCOPES = [

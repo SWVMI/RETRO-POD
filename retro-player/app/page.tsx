@@ -656,11 +656,11 @@ export default function MobileBulletproofPlayer() {
 
     let removeListener: (() => void) | undefined;
 
-    import("@capacitor/app").then(({ App }) => {
+   import("@capacitor/app").then(({ App }) => {
       App.addListener("appUrlOpen", (data: { url: string }) => {
         try {
           const url = new URL(data.url);
-          if (url.hostname === "127.0.0.1" || url.href.includes("127.0.0.1")) {
+          if (url.protocol === "retropod:" || url.href.includes("retropod")) {
             const code = url.searchParams.get("code");
             if (code) {
               completeLoginRef.current(code);
