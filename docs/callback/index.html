@@ -47,7 +47,7 @@
     // scheme. Spotify's dashboard requires an https:// redirect URI, but
     // Android is still happy to intercept a custom scheme link that a page
     // navigates to - so this small bridge satisfies both.
-    var target = "retroipod://callback" + window.location.search;
+    var target = "retropod://callback" + window.location.search;
     document.getElementById("openApp").href = target;
 
     // Try automatically first.

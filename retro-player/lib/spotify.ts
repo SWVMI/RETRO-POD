@@ -1,10 +1,32 @@
 import { Capacitor } from "@capacitor/core";
 
+// --- SPOTIFY REDIRECT SETUP ---
+// Spotify's dashboard now REQUIRES the Redirect URI to be either:
+//   - https://your-domain/callback
+//   - http://127.0.0.1:PORT/callback or http://[::1]:PORT/callback (loopback only)
+// A raw custom scheme like "retropod://callback" is no longer accepted there,
+// even though Android is still happy to open one. The fix: register a real
+// HTTPS page (this repo already has one at docs/callback/index.html, meant
+// to be hosted for free via GitHub Pages) which Spotify redirects to, and
+// that page immediately forwards into the app via the custom scheme, which
+// Android *does* intercept via the intent-filter in AndroidManifest.xml.
+//
+// Derived from this repo's own git remote (github.com/SWVMI/RETRO-POD):
+// once GitHub Pages is enabled (Settings -> Pages -> Deploy from branch ->
+// main -> /docs), this exact URL will be live:
 const AUTH_ENDPOINT = "https://accounts.spotify.com/authorize";
 const TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token";
 const API_BASE = "https://api.spotify.com/v1";
 
-export const SPOTIFY_REDIRECT_URI = "retropod://callback";
+// This MUST exactly match (including trailing slash) both what's registered
+// in the Spotify dashboard AND what docs/callback/index.html forwards from.
+export const SPOTIFY_REDIRECT_URI = "https://swvmi.github.io/RETRO-POD/callback/";
+
+// The final hop, inside the device only - must match the
+// <data android:scheme="..." android:host="..." /> entry in
+// AndroidManifest.xml exactly. This is NOT what you register with Spotify.
+export const SPOTIFY_APP_SCHEME_REDIRECT = "retropod://callback";
+
 export const SPOTIFY_WEB_REDIRECT_URI = typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}` : "";
 
 export const SPOTIFY_SCOPES = [
@@ -51,6 +73,10 @@ export function getSavedClientId(): string {
 
 export function saveClientId(clientId: string) {
   localStorage.setItem(LS_CLIENT_ID, clientId.trim());
+}
+
+export function clearClientId() {
+  localStorage.removeItem(LS_CLIENT_ID);
 }
 
 export function getSavedTokens(): SpotifyTokens | null {

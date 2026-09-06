@@ -13,6 +13,7 @@ import {
   SPOTIFY_REDIRECT_URI,
   getSavedClientId,
   saveClientId,
+  clearClientId,
   isSpotifyConnected,
   startSpotifyLogin,
   completeSpotifyLogin,
@@ -1136,12 +1137,6 @@ export default function MobileBulletproofPlayer() {
           setEqEditMode(false);
           setScreen("eq");
           break;
-        case "spotify_reset_id":
-          localStorage.removeItem("retro_spotify_client_id");
-          setSpotifyClientIdInput("");
-          triggerHaptic("warn", hapticsOn);
-          showSpotifyMessage("Client ID cleared. Enter a new one.");
-          break;
         case "go_now_playing":
           setScreen("nowPlaying");
           break;
@@ -1224,6 +1219,14 @@ export default function MobileBulletproofPlayer() {
           }
           break;
         }
+        case "spotify_reset_id":
+          clearClientId();
+          clearSpotifySession();
+          setSpotifyConnected(false);
+          setSpotifyClientIdInput("");
+          setSpotifyModalMode("clientId");
+          setShowSpotifyModal(true);
+          break;
         default:
           if (selectedItem.actionId?.startsWith("delete_song:")) {
             const fileName = selectedItem.actionId.replace("delete_song:", "");
