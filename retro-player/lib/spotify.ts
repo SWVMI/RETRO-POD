@@ -1,32 +1,11 @@
 import { Capacitor } from "@capacitor/core";
 
-// --- SPOTIFY REDIRECT SETUP ---
-// Spotify's dashboard now REQUIRES the Redirect URI to be either:
-//   - https://your-domain/callback
-//   - http://127.0.0.1:PORT/callback or http://[::1]:PORT/callback (loopback only)
-// A raw custom scheme like "retropod://callback" is no longer accepted there,
-// even though Android is still happy to open one. The fix: register a real
-// HTTPS page (this repo already has one at docs/callback/index.html, meant
-// to be hosted for free via GitHub Pages) which Spotify redirects to, and
-// that page immediately forwards into the app via the custom scheme, which
-// Android *does* intercept via the intent-filter in AndroidManifest.xml.
-//
-// Derived from this repo's own git remote (github.com/SWVMI/RETRO-POD):
-// once GitHub Pages is enabled (Settings -> Pages -> Deploy from branch ->
-// main -> /docs), this exact URL will be live:
 const AUTH_ENDPOINT = "https://accounts.spotify.com/authorize";
 const TOKEN_ENDPOINT = "https://accounts.spotify.com/api/token";
 const API_BASE = "https://api.spotify.com/v1";
 
-// This MUST exactly match (including trailing slash) both what's registered
-// in the Spotify dashboard AND what docs/callback/index.html forwards from.
 export const SPOTIFY_REDIRECT_URI = "https://swvmi.github.io/RETRO-POD/callback/";
-
-// The final hop, inside the device only - must match the
-// <data android:scheme="..." android:host="..." /> entry in
-// AndroidManifest.xml exactly. This is NOT what you register with Spotify.
 export const SPOTIFY_APP_SCHEME_REDIRECT = "retropod://callback";
-
 export const SPOTIFY_WEB_REDIRECT_URI = typeof window !== "undefined" ? `${window.location.origin}${window.location.pathname}` : "";
 
 export const SPOTIFY_SCOPES = [
@@ -118,49 +97,41 @@ function generateCodeVerifier(): string {
 
 async function generateCodeChallenge(verifier: string): Promise<string> {
   if (!crypto || !crypto.subtle) {
-    throw new Error("Crypto API missing. Ensure androidScheme is set to https in capacitor.config.json");
+    throw new Error("Crypto API missing.");
   }
   const data = new TextEncoder().encode(verifier);
   const digest = await crypto.subtle.digest("SHA-256", data);
   return base64UrlEncode(digest);
 }
 
-function activeRedirectUri(): string {
-  return Capacitor.isNativePlatform() ? SPOTIFY_REDIRECT_URI : SPOTIFY_WEB_REDIRECT_URI;
-}
+export const startSpotifyLogin = async (clientId: string) => {
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = await generateCodeChallenge(codeVerifier);
+  localStorage.setItem(LS_VERIFIER, codeVerifier);
 
-export async function startSpotifyLogin(clientId: string) {
-  try {
-    const verifier = generateCodeVerifier();
-    localStorage.setItem(LS_VERIFIER, verifier);
-    const challenge = await generateCodeChallenge(verifier);
+  const params = new URLSearchParams({
+    client_id: clientId,
+    response_type: "code",
+    redirect_uri: SPOTIFY_REDIRECT_URI,
+    code_challenge_method: "S256",
+    code_challenge: codeChallenge,
+    scope: SPOTIFY_SCOPES,
+  });
 
-    const params = new URLSearchParams({
-      response_type: "code",
-      client_id: clientId,
-      scope: SPOTIFY_SCOPES,
-      redirect_uri: activeRedirectUri(),
-      code_challenge_method: "S256",
-      code_challenge: challenge,
-    });
+  const authUrl = `${AUTH_ENDPOINT}?${params.toString()}`;
 
-    const url = `${AUTH_ENDPOINT}?${params.toString()}`;
-
-    if (Capacitor.isNativePlatform()) {
-      try {
-        const { Browser } = await import("@capacitor/browser");
-        await Browser.open({ url, presentationStyle: "popover" });
-      } catch (err) {
-        console.warn("Browser plugin failed, falling back to window location", err);
-        window.location.href = url;
-      }
-    } else {
-      window.location.href = url;
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const { Browser } = await import("@capacitor/browser");
+      await Browser.open({ url: authUrl, presentationStyle: "popover" });
+    } catch (err) {
+      console.warn("Browser plugin failed, falling back to window location", err);
+      window.location.href = authUrl;
     }
-  } catch (error: any) {
-    alert("Login failed: " + error.message);
+  } else {
+    window.location.href = authUrl;
   }
-}
+};
 
 export async function completeSpotifyLogin(code: string): Promise<SpotifyTokens> {
   const clientId = getSavedClientId();
@@ -169,7 +140,7 @@ export async function completeSpotifyLogin(code: string): Promise<SpotifyTokens>
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
-    redirect_uri: activeRedirectUri(),
+    redirect_uri: SPOTIFY_REDIRECT_URI,
     client_id: clientId,
     code_verifier: verifier,
   });
@@ -180,7 +151,10 @@ export async function completeSpotifyLogin(code: string): Promise<SpotifyTokens>
     body: body.toString(),
   });
 
-  if (!res.ok) throw new Error(`Spotify token exchange failed (${res.status})`);
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    throw new Error(`Spotify token exchange failed (${res.status}): ${errText}`);
+  }
 
   const json = await res.json();
   const tokens: SpotifyTokens = {
