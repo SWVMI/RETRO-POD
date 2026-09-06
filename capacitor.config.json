@@ -1,0 +1,8 @@
+{
+  "appId": "com.swaminathan.retropod",
+  "appName": "RetroPod",
+  "webDir": "retro-player/out",
+  "server": {
+    "androidScheme": "https"
+  }
+}

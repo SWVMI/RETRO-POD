@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Connecting to Retro iPod…</title>
+<style>
+  body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #111;
+    color: #eee;
+    font-family: -apple-system, system-ui, sans-serif;
+    text-align: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  .card { max-width: 360px; }
+  h1 { font-size: 16px; margin-bottom: 8px; }
+  p { font-size: 13px; color: #aaa; line-height: 1.5; }
+  a.button {
+    display: inline-block;
+    margin-top: 16px;
+    padding: 12px 20px;
+    background: #1db954;
+    color: #000;
+    font-weight: bold;
+    text-decoration: none;
+    border-radius: 999px;
+    font-size: 13px;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Connecting your Spotify account…</h1>
+    <p>You should be redirected back to the app automatically. If nothing happens, tap the button below.</p>
+    <a class="button" id="openApp" href="#">Open Retro iPod</a>
+  </div>
+
+  <script>
+    // This page's only job: forward whatever query string Spotify sent
+    // (?code=...&state=...) straight into the app via its custom URL
+    // scheme. Spotify's dashboard requires an https:// redirect URI, but
+    // Android is still happy to intercept a custom scheme link that a page
+    // navigates to - so this small bridge satisfies both.
+    var target = "retroipod://callback" + window.location.search;
+    document.getElementById("openApp").href = target;
+
+    // Try automatically first.
+    window.location.replace(target);
+
+    // Fallback in case the automatic redirect is blocked (some in-app
+    // browsers require a user gesture) - try again shortly after.
+    setTimeout(function () {
+      window.location.href = target;
+    }, 600);
+  </script>
+</body>
+</html>
