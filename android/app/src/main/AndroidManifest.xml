@@ -19,13 +19,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-           <!-- Spotify OAuth Local Loopback redirect -->
-            <intent-filter>
-                <action android:name="android.intent.action.VIEW" />
-                <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="http" android:host="127.0.0.1" android:port="8888" android:pathPrefix="/callback" />
-            </intent-filter>
+          <!-- Spotify OAuth Local Loopback redirect -->
+    <intent-filter>
+        <action android:name="android.intent.action.VIEW" />
+        <category android:name="android.intent.category.DEFAULT" />
+        <category android:name="android.intent.category.BROWSABLE" />
+        <data android:scheme="http" android:host="127.0.0.1" android:port="8888" android:pathPrefix="/callback" />
+    </intent-filter>
+</activity>
 
         <provider
             android:name="androidx.core.content.FileProvider"
