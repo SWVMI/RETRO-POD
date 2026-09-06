@@ -121,13 +121,8 @@ export const startSpotifyLogin = async (clientId: string) => {
   const authUrl = `${AUTH_ENDPOINT}?${params.toString()}`;
 
   if (Capacitor.isNativePlatform()) {
-    try {
-      const { Browser } = await import("@capacitor/browser");
-      await Browser.open({ url: authUrl, presentationStyle: "popover" });
-    } catch (err) {
-      console.warn("Browser plugin failed, falling back to window location", err);
-      window.location.href = authUrl;
-    }
+    // Force external system browser invocation so Android doesn't swallow or instantly kill the WebView context
+    window.open(authUrl, "_system");
   } else {
     window.location.href = authUrl;
   }
