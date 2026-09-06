@@ -660,8 +660,12 @@ export default function MobileBulletproofPlayer() {
       App.addListener("appUrlOpen", (data: { url: string }) => {
         try {
           const url = new URL(data.url);
-          const code = url.searchParams.get("code");
-          if (code) completeLoginRef.current(code);
+          if (url.hostname === "127.0.0.1" || url.href.includes("127.0.0.1")) {
+            const code = url.searchParams.get("code");
+            if (code) {
+              completeLoginRef.current(code);
+            }
+          }
         } catch {}
       }).then((handle) => {
         removeListener = () => handle.remove();
@@ -994,7 +998,6 @@ export default function MobileBulletproofPlayer() {
 
     if (distancePercent < 0.45) {
       const now = Date.now();
-      // Double tap on inner ring only resets SPEED now. EQ is protected.
       if (now - lastInnerTapRef.current < 300 && screen === "nowPlaying") {
         setPlaybackSpeed(1.0);
         triggerHaptic("confirm", hapticsOn);
@@ -1030,7 +1033,6 @@ export default function MobileBulletproofPlayer() {
       const direction = accumulatedAngleRef.current > 0 ? 1 : -1;
 
       if (screen === "eq") {
-        // --- EQ CLASSIC TRACKPAD CONTROL ---
         if (eqEditMode) {
           setEqGains((prev) => {
             const newGains = [...prev];
@@ -1535,7 +1537,6 @@ export default function MobileBulletproofPlayer() {
                       key={idx} 
                       onClick={() => {
                         if (selectedIndex === idx) {
-                          // Tap twice to zero out the band
                           setEqGains(prev => {
                             const newGains = [...prev];
                             newGains[idx] = 0;
@@ -1544,7 +1545,6 @@ export default function MobileBulletproofPlayer() {
                           });
                           triggerHaptic("confirm", hapticsOn);
                         } else {
-                          // Tap once to select the band
                           setSelectedIndex(idx);
                           setEqEditMode(true);
                           triggerHaptic("tick", hapticsOn);
@@ -1557,7 +1557,6 @@ export default function MobileBulletproofPlayer() {
                           className="absolute bottom-0 w-full bg-current transition-all"
                           style={{ height: `${((gain + 12) / 24) * 100}%` }}
                         />
-                        {/* Middle zero line */}
                         <div className="absolute top-1/2 w-full h-[1px] bg-current/40" />
                       </div>
                       <div className="flex flex-col items-center">
