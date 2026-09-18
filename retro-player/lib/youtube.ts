@@ -454,7 +454,10 @@ export async function createYouTubeAudioStream(
         quality: "best",
       } as any
     );
-
+console.log("[Audio Debug] MWEB result:", format);
+console.log("[Audio Debug] URL:", !!format?.url);
+console.log("[Audio Debug] ITAG:", format?.itag);
+console.log("[Audio Debug] MIME:", format?.mime_type);
     const url = format.url;
 
     if (!url) {
