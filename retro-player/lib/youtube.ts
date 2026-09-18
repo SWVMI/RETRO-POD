@@ -3,12 +3,19 @@ import {
   UniversalCache,
   Platform,
   Types,
-  Constants,
-  YT,
 } from "youtubei.js";
 
-import { SabrStream } from "googlevideo/sabr-stream";
-import { buildSabrFormat } from "googlevideo/utils";
+import { BotGuardClient } from "bgutils-js/botguard";
+import { WebPoMinter } from "bgutils-js/webpo";
+import type { WebPoSignalOutput } from "bgutils-js/shared-types";
+import {
+  buildURL,
+  parseLooseJSON,
+  getHeaders,
+  USER_AGENT,
+} from "bgutils-js/utils";
+
+import { JSDOM } from "jsdom";
 
 Platform.shim.eval = async (
   data: Types.BuildScriptResult
@@ -18,15 +25,13 @@ Platform.shim.eval = async (
 
 let youtube: Innertube | null = null;
 
-function generateCpn(length = 16): string {
-  const alphabet =
-    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  let result = "";
-  for (let i = 0; i < length; i++) {
-    result += alphabet.charAt(Math.floor(Math.random() * alphabet.length));
-  }
-  return result;
-}
+let webPoMinter: WebPoMinter | null = null;
+let webPoInitPromise: Promise<WebPoMinter> | null = null;
+let webPoDom: JSDOM | null = null;
+
+/* ---------------------------------------------------------
+   YOUTUBE
+--------------------------------------------------------- */
 
 export async function getYouTube() {
   if (!youtube) {
@@ -39,6 +44,268 @@ export async function getYouTube() {
 
   return youtube;
 }
+
+/* ---------------------------------------------------------
+   WEB PO TOKEN
+--------------------------------------------------------- */
+
+async function initializeWebPoMinter(): Promise<WebPoMinter> {
+  console.log("[YouTube PO] Initializing BotGuard/WebPO...");
+
+  const dom = new JSDOM(
+    "<!DOCTYPE html><html lang=\"en\"><head><title></title></head><body></body></html>",
+    {
+      url: "https://www.youtube.com",
+      referrer: "https://www.youtube.com/",
+      userAgent: USER_AGENT,
+    }
+  );
+
+  // Keep the same browser environment alive for both WebPO creation
+  // and minting. The BotGuard mint callback can execute later and
+  // still expects window/document to exist.
+  webPoDom = dom;
+
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: dom.window,
+  });
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: dom.window.document,
+  });
+  Object.defineProperty(globalThis, "location", {
+    configurable: true,
+    value: dom.window.location,
+  });
+  Object.defineProperty(globalThis, "origin", {
+    configurable: true,
+    value: dom.window.origin,
+  });
+  Object.defineProperty(globalThis, "navigator", {
+    configurable: true,
+    value: dom.window.navigator,
+  });
+
+  try {
+    const pageResponse = await fetch("https://www.youtube.com", {
+      headers: {
+        accept: "*/*",
+        "accept-language": "en-US,en;q=0.7",
+        "user-agent": USER_AGENT,
+      },
+    });
+
+    if (!pageResponse.ok) {
+      throw new Error(
+        `YouTube homepage returned HTTP ${pageResponse.status}.`
+      );
+    }
+
+    const pageHtml = await pageResponse.text();
+
+    const ytConfigMatch = pageHtml.match(
+      /ytcfg\.set\(({.+?})\);/s
+    );
+
+    if (!ytConfigMatch) {
+      throw new Error("Could not find YouTube ytcfg.");
+    }
+
+    const ytConfig = JSON.parse(ytConfigMatch[1]);
+
+    (dom.window as any).yt = {
+      config_: ytConfig,
+    };
+
+    (globalThis as any).yt = (dom.window as any).yt;
+
+    const initialAttestationData = pageHtml.match(
+      /window\.ytAtN\(\s*({[\s\S]*?})\s*\)/
+    );
+
+    if (!initialAttestationData) {
+      throw new Error(
+        "Could not find YouTube BotGuard challenge."
+      );
+    }
+
+    const initialAttestationDataJson = parseLooseJSON(
+      initialAttestationData[1]
+    ) as any;
+
+    const challengeResponse = initialAttestationDataJson.R;
+
+    if (!challengeResponse?.bgChallenge) {
+      throw new Error(
+        "YouTube did not provide a BotGuard challenge."
+      );
+    }
+
+    const interpreterUrl =
+      challengeResponse.bgChallenge.interpreterUrl
+        ?.privateDoNotAccessOrElseTrustedResourceUrlWrappedValue;
+
+    if (!interpreterUrl) {
+      throw new Error(
+        "YouTube did not provide a BotGuard interpreter URL."
+      );
+    }
+
+    console.log("[YouTube PO] Loading BotGuard interpreter...");
+
+    const bgScriptResponse = await fetch(
+      `https:${interpreterUrl}`,
+      {
+        headers: {
+          "user-agent": USER_AGENT,
+        },
+      }
+    );
+
+    if (!bgScriptResponse.ok) {
+      throw new Error(
+        `BotGuard interpreter returned HTTP ${bgScriptResponse.status}.`
+      );
+    }
+
+    const interpreterJavascript = await bgScriptResponse.text();
+
+    if (!interpreterJavascript) {
+      throw new Error(
+        "YouTube returned an empty BotGuard interpreter."
+      );
+    }
+
+    new Function(interpreterJavascript)();
+
+    console.log("[YouTube PO] Creating BotGuard client...");
+
+    const botGuardClient = await BotGuardClient.create({
+      program: challengeResponse.bgChallenge.program,
+      globalName: challengeResponse.bgChallenge.globalName,
+      globalObject: globalThis,
+    });
+
+    const webPoSignalOutput: WebPoSignalOutput = [];
+
+    console.log("[YouTube PO] Creating BotGuard snapshot...");
+
+    const botguardResponse = await botGuardClient.snapshot({
+      webPoSignalOutput,
+    });
+
+    const requestKey = "O43z0dpjhgX20SCx4KAo";
+
+    const integrityTokenResponse = await fetch(
+      buildURL("GenerateIT", true),
+      {
+        method: "POST",
+        headers: getHeaders(),
+        body: JSON.stringify([
+          requestKey,
+          botguardResponse,
+        ]),
+      }
+    );
+
+    if (!integrityTokenResponse.ok) {
+      throw new Error(
+        `GenerateIT returned HTTP ${integrityTokenResponse.status}.`
+      );
+    }
+
+    const integrityTokenJson =
+      (await integrityTokenResponse.json()) as [
+        string,
+        number,
+        number,
+        string | undefined
+      ];
+
+    const [
+      integrityToken,
+      estimatedTtlSecs,
+      mintRefreshThreshold,
+      websafeFallbackToken,
+    ] = integrityTokenJson;
+
+    if (!integrityToken) {
+      throw new Error(
+        "YouTube did not return an integrity token."
+      );
+    }
+
+    console.log("[YouTube PO] Creating WebPO minter...");
+
+    const minter = await WebPoMinter.create(
+      {
+        integrityToken,
+        estimatedTtlSecs,
+        mintRefreshThreshold,
+        websafeFallbackToken,
+      },
+      webPoSignalOutput
+    );
+
+    console.log("[YouTube PO] WebPO ready.");
+
+    return minter;
+  } catch (error) {
+    if (webPoDom === dom) {
+      webPoDom = null;
+      try {
+        dom.window.close();
+      } catch {}
+    }
+    throw error;
+  }
+}
+
+async function getWebPoMinter(): Promise<WebPoMinter> {
+  if (webPoMinter) {
+    return webPoMinter;
+  }
+
+  if (!webPoInitPromise) {
+    webPoInitPromise = initializeWebPoMinter();
+  }
+
+  try {
+    webPoMinter = await webPoInitPromise;
+    return webPoMinter;
+  } catch (error) {
+    webPoInitPromise = null;
+    webPoMinter = null;
+    throw error;
+  }
+}
+
+async function getWebPoToken(videoId: string): Promise<string> {
+  const minter = await getWebPoMinter();
+
+  console.log(`[YouTube PO] Minting content token for ${videoId}`);
+
+  // Use the exact JSDOM environment that was used to initialize WebPO.
+  // Do not replace or remove these globals before minting completes.
+  if (!webPoDom) {
+    throw new Error("WebPO browser environment is not available.");
+  }
+
+  const token = await minter.mintAsWebsafeString(videoId);
+
+  if (!token) {
+    throw new Error(`Failed to mint WebPO token for ${videoId}.`);
+  }
+
+  console.log(`[YouTube PO] Token generated for ${videoId}`);
+
+  return token;
+}
+
+/* ---------------------------------------------------------
+   TRACK TYPES
+--------------------------------------------------------- */
 
 export type YouTubeTrack = {
   id: string;
@@ -69,11 +336,15 @@ function durationFrom(item: any): number {
     return item.duration;
   }
 
-  if (typeof item?.duration?.seconds === "number") {
+  if (
+    typeof item?.duration?.seconds === "number"
+  ) {
     return item.duration.seconds;
   }
 
-  if (typeof item?.duration?.text === "string") {
+  if (
+    typeof item?.duration?.text === "string"
+  ) {
     const parts = item.duration.text
       .split(":")
       .map(Number);
@@ -153,314 +424,92 @@ export async function searchYouTube(
 }
 
 /* ---------------------------------------------------------
-   SABR STREAMING
+   AUDIO-ONLY STREAMING
 --------------------------------------------------------- */
 
-export async function createYouTubeSabrStream(
+export async function createYouTubeAudioStream(
   videoId: string
 ) {
   const yt = await getYouTube();
 
   console.log(
-    `[YouTube SABR] Getting video info for ${videoId}`
+    `[YouTube Audio] Resolving audio-only stream for ${videoId}`
   );
-
-  const info = await yt.getBasicInfo(videoId, {
-    client: "MWEB",
-  });
-
-  if (!info.streaming_data) {
-    throw new Error(
-      "YouTube did not return streaming data."
-    );
-  }
-
-  const streamingData = info.streaming_data;
-
-  const rawSabrUrl =
-    streamingData.server_abr_streaming_url;
-
-  if (
-    typeof rawSabrUrl !== "string" ||
-    rawSabrUrl.length === 0
-  ) {
-    throw new Error(
-      "YouTube did not return a server ABR streaming URL."
-    );
-  }
-
-  if (!yt.actions.session.player) {
-    throw new Error(
-      "YouTube session player is not available (retrieve_player must be enabled)."
-    );
-  }
-
-  const sabrUrl = await yt.actions.session.player.decipher(rawSabrUrl);
-
-  if (
-    typeof sabrUrl !== "string" ||
-    sabrUrl.length === 0
-  ) {
-    throw new Error(
-      "Unable to decipher the YouTube SABR streaming URL."
-    );
-  }
-
-  const sabrFormats =
-    streamingData.adaptive_formats.map(
-      (format: any) =>
-        buildSabrFormat(format)
-    );
-
-  if (!sabrFormats.length) {
-    throw new Error(
-      "YouTube returned no SABR-compatible formats."
-    );
-  }
-
-  const audioFormats =
-    sabrFormats.filter((format: any) =>
-      String(format.mimeType || "").startsWith(
-        "audio/"
-      )
-    );
-
-  const videoFormats =
-    sabrFormats.filter((format: any) =>
-      String(format.mimeType || "").startsWith(
-        "video/"
-      )
-    );
-
-  if (!audioFormats.length) {
-    throw new Error(
-      "YouTube returned no audio formats."
-    );
-  }
-
-  if (!videoFormats.length) {
-    throw new Error(
-      "YouTube returned no video formats required by SABR."
-    );
-  }
-
-  const clientInfo = {
-    osName: yt.session.context.client.osName,
-    osVersion: yt.session.context.client.osVersion,
-    clientName: parseInt(
-      Constants.CLIENT_NAME_IDS[
-        yt.session.context.client
-          .clientName as keyof typeof Constants.CLIENT_NAME_IDS
-      ]
-    ),
-    clientVersion:
-      yt.session.context.client.clientVersion,
-  };
-
-  const ustreamerConfig =
-    info.player_config
-      ?.media_common_config
-      ?.media_ustreamer_request_config
-      ?.video_playback_ustreamer_config;
-
-  if (
-    typeof ustreamerConfig !== "string" ||
-    ustreamerConfig.length === 0
-  ) {
-    throw new Error(
-      "YouTube did not provide a Ustreamer configuration."
-    );
-  }
-
-  const selectedAudio =
-    audioFormats
-      .filter((format: any) =>
-        String(format.mimeType || "").includes(
-          "webm"
-        )
-      )
-      .sort(
-        (a: any, b: any) =>
-          (b.bitrate || 0) -
-          (a.bitrate || 0)
-      )[0] ||
-    audioFormats
-      .slice()
-      .sort(
-        (a: any, b: any) =>
-          (b.bitrate || 0) -
-          (a.bitrate || 0)
-      )[0];
-
-  const selectedVideo =
-    videoFormats
-      .slice()
-      .sort(
-        (a: any, b: any) =>
-          (b.height || 0) -
-          (a.height || 0)
-      )[0];
-
-  const sabr =
-    new SabrStream({
-      fetch: globalThis.fetch,
-      serverAbrStreamingUrl: sabrUrl,
-      videoPlaybackUstreamerConfig:
-        ustreamerConfig,
-      clientInfo,
-      formats: sabrFormats,
-      durationMs:
-        info.basic_info?.duration
-          ? Number(
-              info.basic_info.duration
-            ) * 1000
-          : undefined,
-    });
 
   /*
-   * IMPORTANT:
-   *
-   * YouTube can ask the SABR client to reload
-   * its player response while playback is active.
-   *
-   * Without handling this event, playback can
-   * eventually stop even though the original SABR
-   * stream was valid.
+   * MWEB is currently the useful client for direct audio
+   * extraction in this setup. The important difference is
+   * that the resulting GVS URL gets a video-bound WebPO token.
    */
-  sabr.on(
-    "reloadPlayerResponse",
-    async (
-      reloadPlaybackContext: any
-    ) => {
-      try {
-        console.log(
-          `[YouTube SABR] Reloading player response for ${videoId}`
-        );
+  try {
+    console.log(
+      `[YouTube Audio] Trying MWEB client for ${videoId}`
+    );
 
-        const reloadedResponse =
-          await yt.actions.execute(
-            "/player",
-            {
-              videoId,
-              contentCheckOk: true,
-              racyCheckOk: true,
-              playbackContext: {
-                contentPlaybackContext: {
-                  signatureTimestamp:
-                    yt.session.player
-                      ?.signature_timestamp,
-                },
-                reloadPlaybackContext,
-              },
-            }
-          );
+    const format = await yt.getStreamingData(
+      videoId,
+      {
+        client: "MWEB",
+        type: "audio",
+        quality: "best",
+      } as any
+    );
 
-       const reloadedInfo =
-  new YT.VideoInfo(
-    [reloadedResponse],
-    yt.actions,
-    generateCpn(16)
-  );
+    const url = format.url;
 
-        const newRawSabrUrl =
-          reloadedInfo.streaming_data
-            ?.server_abr_streaming_url;
-
-        if (
-          typeof newRawSabrUrl !== "string" ||
-          !newRawSabrUrl
-        ) {
-          throw new Error(
-            "Reloaded player response did not contain a SABR URL."
-          );
-        }
-
-        if (!yt.actions.session.player) {
-          throw new Error(
-            "YouTube session player is not available for reload."
-          );
-        }
-
-        const newSabrUrl =
-          await yt.actions.session.player.decipher(newRawSabrUrl);
-
-        if (
-          typeof newSabrUrl !== "string" ||
-          !newSabrUrl
-        ) {
-          throw new Error(
-            "Unable to decipher reloaded SABR URL."
-          );
-        }
-
-        sabr.setStreamingURL(
-          newSabrUrl
-        );
-
-        const newUstreamerConfig =
-          reloadedInfo.player_config
-            ?.media_common_config
-            ?.media_ustreamer_request_config
-            ?.video_playback_ustreamer_config;
-
-        if (
-          typeof newUstreamerConfig ===
-            "string" &&
-          newUstreamerConfig.length > 0
-        ) {
-          sabr.setUstreamerConfig(
-            newUstreamerConfig
-          );
-        }
-
-        if (
-          reloadedInfo.streaming_data
-            ?.adaptive_formats
-        ) {
-          sabr.setServerAbrFormats(
-            reloadedInfo.streaming_data
-              .adaptive_formats.map(
-                (format: any) =>
-                  buildSabrFormat(format)
-              )
-          );
-        }
-
-        console.log(
-          `[YouTube SABR] Player response reloaded successfully for ${videoId}`
-        );
-      } catch (error) {
-        console.error(
-          `[YouTube SABR] Failed to reload player response for ${videoId}:`,
-          error
-        );
-      }
+    if (!url) {
+      throw new Error(
+        "YouTube returned no playable MWEB audio URL."
+      );
     }
-  );
 
-  const result =
-    await sabr.start({
-      videoFormat: selectedVideo,
-      audioFormat: selectedAudio,
-      enabledTrackTypes: 1,
-      preferWebM: true,
-      preferOpus: true,
-      maxRetries: 10,
-    });
+    console.log(
+      `[YouTube Audio] MWEB selected itag=${format.itag}, mime=${format.mime_type}`
+    );
 
-  return {
-    stream: result.audioStream,
-    mimeType:
-      selectedAudio.mimeType ||
-      "audio/webm",
-    duration:
-      info.basic_info?.duration
-        ? Number(
-            info.basic_info.duration
-          )
-        : undefined,
-    sabr,
-  };
+    /*
+     * Generate a fresh token bound specifically to this
+     * video. YouTube's current WebPO implementation binds
+     * the content token to the video ID.
+     */
+    const poToken =
+      await getWebPoToken(videoId);
+
+    const separator = url.includes("?")
+      ? "&"
+      : "?";
+
+    const playableUrl =
+      `${url}${separator}pot=${encodeURIComponent(poToken)}`;
+
+    console.log(
+      `[YouTube Audio] WebPO token attached to ${videoId}`
+    );
+
+    return {
+      url: playableUrl,
+      mimeType:
+        format.mime_type ||
+        "audio/mp4",
+      duration:
+        format.approx_duration_ms
+          ? Number(format.approx_duration_ms) / 1000
+          : undefined,
+    };
+  } catch (error) {
+    console.error(
+      `[YouTube Audio] MWEB + WebPO failed for ${videoId}:`,
+      error
+    );
+
+    throw new Error(
+      `Unable to resolve a playable YouTube audio stream for ${videoId}. ${
+        error instanceof Error
+          ? error.message
+          : String(error)
+      }`
+    );
+  }
 }
 
 /* ---------------------------------------------------------

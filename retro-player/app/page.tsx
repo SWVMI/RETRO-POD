@@ -119,6 +119,8 @@ export default function MobileBulletproofPlayer() {
   const shuffleOnRef = useRef(false);
   const localSongsRef = useRef<SongItem[]>([]);
   const currentIndexRef = useRef(0);
+  const isPlayingRef = useRef(false);
+  const youtubePlaybackRequestRef = useRef(0);
 
   useEffect(() => { clock24hRef.current = clock24h; }, [clock24h]);
   useEffect(() => { sleepTimerEndAtRef.current = sleepTimerEndAt; }, [sleepTimerEndAt]);
@@ -127,6 +129,7 @@ export default function MobileBulletproofPlayer() {
   useEffect(() => { shuffleOnRef.current = shuffleOn; }, [shuffleOn]);
   useEffect(() => { localSongsRef.current = localSongs; }, [localSongs]);
   useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
+  useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
 
   // --- AUDIO ENGINE INIT & EQ ROUTING ---
   const ensureAudioGraph = () => {
@@ -418,15 +421,30 @@ export default function MobileBulletproofPlayer() {
   const playSong = (song: SongItem, index: number) => {
     ensureAudioGraph();
     wakeUpAudioCtx();
+
+    const audio = audioRef.current;
     setPlaybackSource("local");
     setCurrentSong(song);
     setCurrentIndex(index);
-    if (audioRef.current) {
-      audioRef.current.src = URL.createObjectURL(song.file);
-      audioRef.current.load();
-    }
     setScreen("nowPlaying");
-    setIsPlaying(true);
+
+    if (audio) {
+      audio.pause();
+      audio.src = URL.createObjectURL(song.file);
+      audio.load();
+      audio.playbackRate = playbackSpeed;
+      audio.play().then(() => {
+        isPlayingRef.current = true;
+        setIsPlaying(true);
+      }).catch((error) => {
+        console.error("Local playback failed:", error);
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+      });
+    } else {
+      isPlayingRef.current = true;
+      setIsPlaying(true);
+    }
   };
 
   const showYouTubeError = (message: string) => {
@@ -456,40 +474,56 @@ export default function MobileBulletproofPlayer() {
     if (!list.length || !list[index]) return;
 
     const track = list[index];
+    const requestId = ++youtubePlaybackRequestRef.current;
 
     try {
       ensureAudioGraph();
       wakeUpAudioCtx();
 
-      // Explicitly switch the unified player away from any previously
-      // selected local track. The same HTMLAudioElement is reused for both
-      // local files and YouTube streams.
+      const audio = audioRef.current;
+      if (!audio) return;
+
+      // Stop the previous track immediately. The request id prevents an older
+      // stream lookup from replacing a newer queue selection.
+      audio.pause();
+      isPlayingRef.current = false;
+      setIsPlaying(false);
+
       setCurrentSong(null);
       setPlaybackSource("youtube");
-
       setYouTubeQueue(list);
       setYouTubeQueueIndex(index);
       setYouTubeCurrentTrack(track);
       setScreen("nowPlaying");
-      setIsPlaying(false);
 
       const stream = await getYouTubeStream(track.id);
 
-      if (!audioRef.current) return;
+      // User selected another track while this stream was resolving.
+      if (requestId !== youtubePlaybackRequestRef.current) return;
 
-      // getYouTubeStream now resolves to a same-origin proxy URL. This keeps
-      // the YouTube media inside the app's origin and avoids the Web Audio
-      // cross-origin restriction that can mute MediaElementAudioSourceNode.
-      audioRef.current.pause();
-      audioRef.current.src = stream.url;
-      audioRef.current.load();
-      audioRef.current.playbackRate = playbackSpeed;
-      await audioRef.current.play();
+      const currentAudio = audioRef.current;
+      if (!currentAudio) return;
 
+      currentAudio.pause();
+      currentAudio.src = stream.url;
+      currentAudio.load();
+      currentAudio.playbackRate = playbackSpeed;
+
+      await currentAudio.play();
+
+      // Make sure a stale request cannot mark the new track as playing.
+      if (requestId !== youtubePlaybackRequestRef.current) {
+        currentAudio.pause();
+        return;
+      }
+
+      isPlayingRef.current = true;
       setIsPlaying(true);
       triggerHaptic("select", hapticsOn);
     } catch (error) {
+      if (requestId !== youtubePlaybackRequestRef.current) return;
       console.error("YouTube playback failed:", error);
+      isPlayingRef.current = false;
       setIsPlaying(false);
       showYouTubeError("Couldn't play this YouTube track.");
     }
@@ -754,6 +788,8 @@ export default function MobileBulletproofPlayer() {
   }, [playbackSpeed]);
 
   useEffect(() => {
+    isPlayingRef.current = isPlaying;
+
     if (isPlaying) {
       ensureAudioGraph();
       wakeUpAudioCtx();
@@ -761,7 +797,7 @@ export default function MobileBulletproofPlayer() {
     } else {
       audioRef.current?.pause();
     }
-  }, [isPlaying, currentSong, playbackSource]);
+  }, [isPlaying]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
