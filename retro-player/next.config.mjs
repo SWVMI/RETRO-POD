@@ -4,6 +4,8 @@ const nextConfig = {
   images: {
     unoptimized: true,
   },
+
+  serverExternalPackages: ["jsdom"],
 };
 
 export default nextConfig;
