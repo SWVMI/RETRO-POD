@@ -22,7 +22,7 @@ jobs:
 
       - name: Install Web App Dependencies
         working-directory: retro-player
-        run: npm install
+        run: npm ci
 
       - name: Install CI TypeScript Dependencies
         working-directory: retro-player
