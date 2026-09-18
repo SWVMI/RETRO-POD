@@ -31,7 +31,55 @@ jobs:
       - name: Configure TypeScript for CI
         working-directory: retro-player
         run: |
-          node -e "const fs=require('fs'); const p='tsconfig.json'; const c=JSON.parse(fs.readFileSync(p,'utf8')); c.compilerOptions={...(c.compilerOptions||{}), target:'ES2018'}; fs.writeFileSync(p, JSON.stringify(c,null,2)+'\n');"
+          node <<'EOF'
+          const fs = require('fs');
+
+          const path = 'tsconfig.json';
+          const config = JSON.parse(fs.readFileSync(path, 'utf8'));
+
+          config.compilerOptions = {
+            ...(config.compilerOptions || {}),
+            target: 'ES2018'
+          };
+
+          fs.writeFileSync(
+            path,
+            JSON.stringify(config, null, 2) + '\n'
+          );
+
+          console.log('TypeScript target set to ES2018');
+          EOF
+
+          echo "Updated tsconfig.json:"
+          cat tsconfig.json
+
+      - name: Fix JSDOM TypeScript Definition for CI
+        working-directory: retro-player
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+
+          const path = 'node_modules/@types/jsdom/base.d.ts';
+
+          if (!fs.existsSync(path)) {
+            console.log('@types/jsdom declaration file not found');
+            process.exit(0);
+          }
+
+          let content = fs.readFileSync(path, 'utf8');
+
+          if (!content.includes('userAgent?: string')) {
+            content = content.replace(
+              /interface ConstructorOptions \{/,
+              'interface ConstructorOptions {\n    userAgent?: string;'
+            );
+
+            fs.writeFileSync(path, content);
+            console.log('Added userAgent to JSDOM ConstructorOptions for CI');
+          } else {
+            console.log('userAgent already exists in JSDOM declarations');
+          }
+          EOF
 
       - name: Build Next.js Web App
         working-directory: retro-player
