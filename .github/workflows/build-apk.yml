@@ -56,30 +56,48 @@ jobs:
       - name: Fix JSDOM TypeScript Definition for CI
         working-directory: retro-player
         run: |
-          node <<'EOF'
-          const fs = require('fs');
+          echo "Searching for JSDOM ConstructorOptions declaration..."
 
-          const path = 'node_modules/@types/jsdom/base.d.ts';
+          JSDOM_FILE=$(grep -RIl "interface ConstructorOptions" node_modules/@types node_modules/jsdom 2>/dev/null | head -n 1 || true)
 
-          if (!fs.existsSync(path)) {
-            console.log('@types/jsdom declaration file not found');
-            process.exit(0);
-          }
+          if [ -z "$JSDOM_FILE" ]; then
+            echo "Could not locate ConstructorOptions declaration."
+            echo "Installed JSDOM packages:"
+            npm ls jsdom @types/jsdom || true
+            exit 1
+          fi
 
-          let content = fs.readFileSync(path, 'utf8');
+          echo "Found declaration at: $JSDOM_FILE"
 
-          if (!content.includes('userAgent?: string')) {
-            content = content.replace(
-              /interface ConstructorOptions \{/,
-              'interface ConstructorOptions {\n    userAgent?: string;'
-            );
+          if grep -q "userAgent" "$JSDOM_FILE"; then
+            echo "userAgent declaration already exists."
+          else
+            python3 - "$JSDOM_FILE" <<'PY'
+          import sys
 
-            fs.writeFileSync(path, content);
-            console.log('Added userAgent to JSDOM ConstructorOptions for CI');
-          } else {
-            console.log('userAgent already exists in JSDOM declarations');
-          }
-          EOF
+          path = sys.argv[1]
+
+          with open(path, "r", encoding="utf-8") as f:
+              content = f.read()
+
+          marker = "interface ConstructorOptions {"
+
+          if marker not in content:
+              print("ConstructorOptions interface not found.")
+              sys.exit(1)
+
+          content = content.replace(
+              marker,
+              marker + "\n    userAgent?: string;",
+              1
+          )
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(content)
+
+          print("Added userAgent to ConstructorOptions for CI.")
+          PY
+          fi
 
       - name: Build Next.js Web App
         working-directory: retro-player
