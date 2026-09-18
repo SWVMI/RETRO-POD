@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>RetroPod</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: #1c1c1e;
+    color: #d4d4d4;
+    font-family: -apple-system, system-ui, sans-serif;
+  }
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 12px;
+    text-align: center;
+    padding: 24px;
+    box-sizing: border-box;
+  }
+  .spinner {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    border: 3px solid rgba(212, 212, 212, 0.25);
+    border-top-color: #d4d4d4;
+    animation: spin 0.8s linear infinite;
+  }
+  p { font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; opacity: 0.7; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+  <div class="spinner"></div>
+  <p>Loading RetroPod&hellip;</p>
+</body>
+</html>

@@ -6,28 +6,10 @@ import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizont
 import { triggerHaptic } from "@/lib/haptics";
 import AlbumCoverflow, { CoverflowItem } from "@/components/AlbumCoverflow";
 import {
-  SpotifyPlaylist,
-  SpotifyTrack,
-  SpotifyPlaybackState,
-  NoActiveDeviceError,
-  SPOTIFY_REDIRECT_URI,
-  getSavedClientId,
-  saveClientId,
-  clearClientId,
-  isSpotifyConnected,
-  startSpotifyLogin,
-  completeSpotifyLogin,
-  clearSpotifySession,
-  fetchPlaylists,
-  fetchSavedTracks,
-  fetchPlaylistTracks,
-  playTrackUri,
-  resumePlayback,
-  pausePlayback,
-  nextTrack as spotifyNextTrack,
-  previousTrack as spotifyPreviousTrack,
-  getCurrentPlayback,
-} from "@/lib/spotify";
+  searchYouTube,
+  getYouTubeStream,
+  getYouTubePlaylist,
+} from "@/lib/youtube-client";
 
 // --- GLOBAL AUDIO CONTEXT & HELPERS ---
 let audioCtx: AudioContext | null = null;
@@ -40,16 +22,26 @@ const formatTime = (seconds: number) => {
 };
 
 type SongItem = { file: File; name: string; artworkUrl?: string };
+type YouTubeTrack = {
+  id: string;
+  title: string;
+  artist: string;
+  album?: string;
+  duration: number;
+  thumbnail: string;
+  source: "youtube";
+};
+
 type MenuItem = {
   label: string;
-  type: "menu" | "action" | "song" | "spotify_track";
+  type: "menu" | "action" | "song" | "youtube_track";
   targetId?: string;
   actionId?: string;
   song?: SongItem;
-  spotifyTrack?: SpotifyTrack;
+  youtubeTrack?: YouTubeTrack;
 };
 type Menu = { id: string; title: string; items: MenuItem[] };
-type PlaybackSource = "local" | "spotify";
+type PlaybackSource = "local" | "youtube";
 
 export default function MobileBulletproofPlayer() {
   const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
@@ -57,11 +49,20 @@ export default function MobileBulletproofPlayer() {
   const [currentTimeStr, setCurrentTimeStr] = useState("12:00");
   const [showOnboarding, setShowOnboarding] = useState(false);
   
-  // Spotify Modals
-  const [showSpotifyModal, setShowSpotifyModal] = useState(false);
-  const [spotifyModalMode, setSpotifyModalMode] = useState<"clientId" | "message">("clientId");
-  const [spotifyModalMessage, setSpotifyModalMessage] = useState("");
-  const [spotifyClientIdInput, setSpotifyClientIdInput] = useState("");
+  // YouTube state
+  const [showYouTubeModal, setShowYouTubeModal] = useState(false);
+  const [youtubeSearchInput, setYouTubeSearchInput] = useState("");
+  const [youtubeSearchResults, setYouTubeSearchResults] = useState<YouTubeTrack[]>([]);
+  const [youtubeSearchLoading, setYouTubeSearchLoading] = useState(false);
+  const [youtubeError, setYouTubeError] = useState("");
+  const [youtubeAccountConnected, setYouTubeAccountConnected] = useState(false);
+  const [youtubePlaylists, setYouTubePlaylists] = useState<any[]>([]);
+  const [youtubePlaylistsLoading, setYouTubePlaylistsLoading] = useState(false);
+  const [youtubePlaylistTracks, setYouTubePlaylistTracks] = useState<Record<string, YouTubeTrack[]>>({});
+  const [youtubePlaylistTracksLoading, setYouTubePlaylistTracksLoading] = useState<string | null>(null);
+  const [youtubeQueue, setYouTubeQueue] = useState<YouTubeTrack[]>([]);
+  const [youtubeQueueIndex, setYouTubeQueueIndex] = useState(0);
+  const [youtubeCurrentTrack, setYouTubeCurrentTrack] = useState<YouTubeTrack | null>(null);
 
   // Settings
   const [lcdTheme, setLcdTheme] = useState<
@@ -80,19 +81,8 @@ export default function MobileBulletproofPlayer() {
   const [eqGains, setEqGains] = useState<number[]>([0, 0, 0, 0, 0]);
   const [eqEditMode, setEqEditMode] = useState(false);
 
-  // --- SPOTIFY STATE ---
+  // --- UNIFIED PLAYBACK STATE ---
   const [playbackSource, setPlaybackSource] = useState<PlaybackSource>("local");
-  const [spotifyConnected, setSpotifyConnected] = useState(false);
-  const [spotifyPlaylists, setSpotifyPlaylists] = useState<SpotifyPlaylist[]>([]);
-  const [spotifyPlaylistsLoading, setSpotifyPlaylistsLoading] = useState(false);
-  const [spotifyLikedTracks, setSpotifyLikedTracks] = useState<SpotifyTrack[]>([]);
-  const [spotifyLikedLoading, setSpotifyLikedLoading] = useState(false);
-  const [spotifyPlaylistTracks, setSpotifyPlaylistTracks] = useState<Record<string, SpotifyTrack[]>>({});
-  const [spotifyPlaylistTracksLoading, setSpotifyPlaylistTracksLoading] = useState<string | null>(null);
-  const [spotifyQueue, setSpotifyQueue] = useState<SpotifyTrack[]>([]);
-  const [spotifyQueueIndex, setSpotifyQueueIndex] = useState(0);
-  const [spotifyNowPlaying, setSpotifyNowPlaying] = useState<SpotifyPlaybackState | null>(null);
-  const [spotifyIsPlaying, setSpotifyIsPlaying] = useState(false);
 
   // References
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -439,35 +429,76 @@ export default function MobileBulletproofPlayer() {
     setIsPlaying(true);
   };
 
-  const showSpotifyMessage = (message: string) => {
-    setSpotifyModalMode("message");
-    setSpotifyModalMessage(message);
-    setShowSpotifyModal(true);
+  const showYouTubeError = (message: string) => {
+    setYouTubeError(message);
   };
 
-  const runSpotifyAction = async (action: () => Promise<void>) => {
+  const handleYouTubeSearch = async (query: string) => {
+    const cleanQuery = query.trim();
+    if (!cleanQuery) return;
+
+    setYouTubeSearchLoading(true);
+    setYouTubeError("");
+
     try {
-      await action();
-    } catch (e) {
-      if (e instanceof NoActiveDeviceError) {
-        showSpotifyMessage(
-          "No active Spotify device found. Open the Spotify app on this phone once (even just to the home screen), then try again."
-        );
-      } else {
-        showSpotifyMessage("Spotify ran into a problem. Please try reconnecting your account.");
-      }
+      const results = await searchYouTube(cleanQuery);
+      setYouTubeSearchResults(results as YouTubeTrack[]);
+      setShowYouTubeModal(true);
+    } catch (error) {
+      console.error("YouTube search failed:", error);
+      showYouTubeError("Couldn't search YouTube. Please try again.");
+    } finally {
+      setYouTubeSearchLoading(false);
     }
   };
 
-  const playSpotifyList = (list: SpotifyTrack[], index: number) => {
-    if (!list.length) return;
-    setPlaybackSource("spotify");
-    setSpotifyQueue(list);
-    setSpotifyQueueIndex(index);
-    setScreen("nowPlaying");
-    setSpotifyIsPlaying(true);
-    triggerHaptic("select", hapticsOn);
-    runSpotifyAction(() => playTrackUri(list[index].uri, list.map((t) => t.uri)));
+  const playYouTubeList = async (list: YouTubeTrack[], index: number) => {
+    if (!list.length || !list[index]) return;
+
+    const track = list[index];
+
+    try {
+      ensureAudioGraph();
+      wakeUpAudioCtx();
+
+      // Explicitly switch the unified player away from any previously
+      // selected local track. The same HTMLAudioElement is reused for both
+      // local files and YouTube streams.
+      setCurrentSong(null);
+      setPlaybackSource("youtube");
+
+      setYouTubeQueue(list);
+      setYouTubeQueueIndex(index);
+      setYouTubeCurrentTrack(track);
+      setScreen("nowPlaying");
+      setIsPlaying(false);
+
+      const stream = await getYouTubeStream(track.id);
+
+      if (!audioRef.current) return;
+
+      // getYouTubeStream now resolves to a same-origin proxy URL. This keeps
+      // the YouTube media inside the app's origin and avoids the Web Audio
+      // cross-origin restriction that can mute MediaElementAudioSourceNode.
+      audioRef.current.pause();
+      audioRef.current.src = stream.url;
+      audioRef.current.load();
+      audioRef.current.playbackRate = playbackSpeed;
+      await audioRef.current.play();
+
+      setIsPlaying(true);
+      triggerHaptic("select", hapticsOn);
+    } catch (error) {
+      console.error("YouTube playback failed:", error);
+      setIsPlaying(false);
+      showYouTubeError("Couldn't play this YouTube track.");
+    }
+  };
+
+  const playYouTubeTrack = (track: YouTubeTrack) => {
+    const queue = youtubeSearchResults.length ? youtubeSearchResults : [track];
+    const index = Math.max(0, queue.findIndex((item) => item.id === track.id));
+    return playYouTubeList(queue, index);
   };
 
   const pickRandomIndex = (length: number, exclude: number) => {
@@ -478,31 +509,74 @@ export default function MobileBulletproofPlayer() {
   };
 
   const handleNextSong = () => {
-    if (playbackSource === "spotify") {
-      if (!spotifyQueue.length) return;
-      setSpotifyQueueIndex((i) => (i + 1) % spotifyQueue.length);
-      runSpotifyAction(() => spotifyNextTrack());
+    if (playbackSource === "youtube") {
+      if (!youtubeQueue.length) return;
+
+      const nextIdx = shuffleOn
+        ? pickRandomIndex(youtubeQueue.length, youtubeQueueIndex)
+        : (youtubeQueueIndex + 1) % youtubeQueue.length;
+
+      playYouTubeList(youtubeQueue, nextIdx);
       return;
     }
+
     if (localSongs.length === 0) return;
     const nextIdx = shuffleOn ? pickRandomIndex(localSongs.length, currentIndex) : (currentIndex + 1) % localSongs.length;
     playSong(localSongs[nextIdx], nextIdx);
   };
 
   const handlePrevSong = () => {
-    if (playbackSource === "spotify") {
-      if (!spotifyQueue.length) return;
-      setSpotifyQueueIndex((i) => (i - 1 + spotifyQueue.length) % spotifyQueue.length);
-      runSpotifyAction(() => spotifyPreviousTrack());
+    if (playbackSource === "youtube") {
+      if (!youtubeQueue.length) return;
+
+      const prevIdx =
+        (youtubeQueueIndex - 1 + youtubeQueue.length) %
+        youtubeQueue.length;
+
+      playYouTubeList(youtubeQueue, prevIdx);
       return;
     }
+
     if (localSongs.length === 0) return;
     const prevIdx = (currentIndex - 1 + localSongs.length) % localSongs.length;
     playSong(localSongs[prevIdx], prevIdx);
   };
 
   const handleTrackEnded = () => {
-    if (playbackSourceRef.current === "spotify") return;
+    if (playbackSourceRef.current === "youtube") {
+      if (repeatModeRef.current === "one" && audioRef.current) {
+        audioRef.current.currentTime = 0;
+        audioRef.current.play().catch(() => {});
+        return;
+      }
+
+      if (!youtubeQueue.length) {
+        setIsPlaying(false);
+        return;
+      }
+
+      if (shuffleOnRef.current) {
+        const nextIdx = pickRandomIndex(
+          youtubeQueue.length,
+          youtubeQueueIndex
+        );
+        playYouTubeList(youtubeQueue, nextIdx);
+        return;
+      }
+
+      const isLast = youtubeQueueIndex === youtubeQueue.length - 1;
+
+      if (isLast && repeatModeRef.current === "off") {
+        setIsPlaying(false);
+        return;
+      }
+
+      const nextIdx =
+        (youtubeQueueIndex + 1) % youtubeQueue.length;
+
+      playYouTubeList(youtubeQueue, nextIdx);
+      return;
+    }
 
     if (repeatModeRef.current === "one") {
       if (audioRef.current) {
@@ -574,12 +648,8 @@ export default function MobileBulletproofPlayer() {
 
       const endAt = sleepTimerEndAtRef.current;
       if (endAt !== null && Date.now() >= endAt) {
-        if (playbackSourceRef.current === "spotify") {
-          setSpotifyIsPlaying(false);
-          runSpotifyAction(() => pausePlayback());
-        } else {
-          setIsPlaying(false);
-        }
+        setIsPlaying(false);
+        audioRef.current?.pause();
         setSleepTimerEndAt(null);
       }
 
@@ -593,6 +663,9 @@ export default function MobileBulletproofPlayer() {
     if (!audioRef.current) {
       audioRef.current = new Audio();
     }
+
+    // Keep the shared audio element compatible with the Web Audio graph.
+    audioRef.current.crossOrigin = "anonymous";
 
     const audio = audioRef.current;
     
@@ -638,77 +711,29 @@ export default function MobileBulletproofPlayer() {
     };
   }, []);
 
-  const completeLoginRef = useRef<(code: string) => void>(() => {});
   useEffect(() => {
-    completeLoginRef.current = async (code: string) => {
-      try {
-        await completeSpotifyLogin(code);
-        setSpotifyConnected(true);
-      } catch {
-        showSpotifyMessage("Couldn't finish connecting to Spotify. Please try again.");
-      }
-    };
-  });
-
-  useEffect(() => {
-    setSpotifyConnected(isSpotifyConnected());
-    const savedClientId = getSavedClientId();
-    if (savedClientId) setSpotifyClientIdInput(savedClientId);
-
-    let removeListener: (() => void) | undefined;
-
-   import("@capacitor/app").then(({ App }) => {
-      App.addListener("appUrlOpen", (data: { url: string }) => {
-        try {
-          const url = new URL(data.url);
-          if (url.protocol === "retropod:" || url.href.includes("retropod")) {
-            const code = url.searchParams.get("code");
-            if (code) {
-              completeLoginRef.current(code);
-            }
-          }
-        } catch {}
-      }).then((handle) => {
-        removeListener = () => handle.remove();
-      });
-    }).catch(() => {});
-
-    if (typeof window !== "undefined") {
-      const params = new URLSearchParams(window.location.search);
-      const code = params.get("code");
-      if (code) {
-        completeLoginRef.current(code);
-        window.history.replaceState({}, "", window.location.pathname);
-      }
-    }
-
-    return () => removeListener?.();
-  }, []);
-
-  useEffect(() => {
-    if (playbackSource !== "spotify" || screen !== "nowPlaying" || !spotifyConnected) return;
-
     let cancelled = false;
-    const poll = async () => {
+
+    const checkYouTubeAccount = async () => {
       try {
-        const state = await getCurrentPlayback();
-        if (cancelled || !state) return;
-        setSpotifyNowPlaying(state);
-        setSpotifyIsPlaying(state.isPlaying);
-        if (state.track) {
-          const idx = spotifyQueue.findIndex((t) => t.uri === state.track!.uri);
-          if (idx >= 0) setSpotifyQueueIndex(idx);
+        const response = await fetch("/api/youtube/account/playlists", {
+          credentials: "include",
+        });
+
+        if (!cancelled) {
+          setYouTubeAccountConnected(response.ok);
         }
       } catch {
+        if (!cancelled) setYouTubeAccountConnected(false);
       }
     };
-    poll();
-    const interval = setInterval(poll, 3000);
+
+    checkYouTubeAccount();
+
     return () => {
       cancelled = true;
-      clearInterval(interval);
     };
-  }, [playbackSource, screen, spotifyConnected, spotifyQueue]);
+  }, []);
 
   useEffect(() => { localStorage.setItem("retro_theme", lcdTheme); }, [lcdTheme]);
   useEffect(() => { localStorage.setItem("retro_haptics", String(hapticsOn)); }, [hapticsOn]);
@@ -736,22 +761,41 @@ export default function MobileBulletproofPlayer() {
     } else {
       audioRef.current?.pause();
     }
-  }, [isPlaying, currentSong]);
+  }, [isPlaying, currentSong, playbackSource]);
 
   useEffect(() => {
-    if ('mediaSession' in navigator && currentSong) {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: currentSong.name,
-        artist: 'Local Device Library',
-        album: 'Retro Custom Player',
-        artwork: currentSong.artworkUrl ? [{ src: currentSong.artworkUrl, sizes: '512x512', type: 'image/jpeg' }] : []
-      });
-      navigator.mediaSession.setActionHandler('play', () => setIsPlaying(true));
-      navigator.mediaSession.setActionHandler('pause', () => setIsPlaying(false));
-      navigator.mediaSession.setActionHandler('previoustrack', handlePrevSong);
-      navigator.mediaSession.setActionHandler('nexttrack', handleNextSong);
-    }
-  }, [currentSong, localSongs, currentIndex]);
+    if (!("mediaSession" in navigator)) return;
+
+    const title = playbackSource === "youtube"
+      ? youtubeCurrentTrack?.title
+      : currentSong?.name;
+
+    if (!title) return;
+
+    const artist = playbackSource === "youtube"
+      ? youtubeCurrentTrack?.artist || "YouTube"
+      : "Local Device Library";
+
+    const artworkUrl = playbackSource === "youtube"
+      ? youtubeCurrentTrack?.thumbnail
+      : currentSong?.artworkUrl;
+
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title,
+      artist,
+      album: playbackSource === "youtube"
+        ? youtubeCurrentTrack?.album || "YouTube"
+        : "Retro Custom Player",
+      artwork: artworkUrl
+        ? [{ src: artworkUrl, sizes: "512x512", type: "image/jpeg" }]
+        : [],
+    });
+
+    navigator.mediaSession.setActionHandler("play", () => setIsPlaying(true));
+    navigator.mediaSession.setActionHandler("pause", () => setIsPlaying(false));
+    navigator.mediaSession.setActionHandler("previoustrack", handlePrevSong);
+    navigator.mediaSession.setActionHandler("nexttrack", handleNextSong);
+  }, [currentSong, youtubeCurrentTrack, playbackSource, localSongs, currentIndex, youtubeQueueIndex]);
 
   const sortedLocalSongs = useMemo(() => {
     if (sortMode === "a-z") return [...localSongs].sort((a, b) => a.name.localeCompare(b.name));
@@ -761,7 +805,7 @@ export default function MobileBulletproofPlayer() {
 
   // --- MENUS & UI LOGIC ---
   const menus = useMemo((): Record<string, Menu> => {
-    const isReadyToPlay = currentSong || (playbackSource === "spotify" && spotifyNowPlaying);
+    const isReadyToPlay = currentSong || youtubeCurrentTrack;
 
     return {
       root: {
@@ -770,7 +814,7 @@ export default function MobileBulletproofPlayer() {
         items: [
           ...(isReadyToPlay ? [{ label: "Now Playing", type: "action" as const, actionId: "go_now_playing" }] : []),
           { label: "Local Audio Library", type: "menu", targetId: "local" },
-          { label: "Spotify Library", type: "menu", targetId: "spotify" },
+          { label: "YouTube Music", type: "menu", targetId: "youtube" },
           { label: "Playback Tools", type: "menu", targetId: "tools" },
           { label: "System Settings", type: "menu", targetId: "settings" }
         ]
@@ -814,61 +858,65 @@ export default function MobileBulletproofPlayer() {
             }))
           : [{ label: "(Library is empty)", type: "action", actionId: "noop" }]
       },
-      spotify: {
-        id: "spotify",
-        title: "Spotify",
-        items: spotifyConnected
-          ? [
-              { label: "Your Playlists", type: "menu", targetId: "spotify_playlists" },
-              { label: "Liked Songs", type: "menu", targetId: "spotify_liked" },
-              { label: "[ Disconnect Account ]", type: "action", actionId: "spotify_disconnect" },
-            ]
-          : [
-              { label: "[ Connect Account ]", type: "action", actionId: "spotify_auth" },
-              { label: "[ Reset Client ID ]", type: "action", actionId: "spotify_reset_id" }
-            ],
+      youtube: {
+        id: "youtube",
+        title: "YouTube",
+        items: [
+          { label: "Search YouTube", type: "action", actionId: "youtube_search" },
+          youtubeAccountConnected
+            ? { label: "Your Playlists", type: "menu", targetId: "youtube_playlists" }
+            : { label: "Sign In & Sync Playlists", type: "action", actionId: "youtube_sign_in" },
+          ...(youtubeAccountConnected
+            ? [{ label: "[ Sign Out ]", type: "action" as const, actionId: "youtube_sign_out" }]
+            : []),
+        ],
       },
-      spotify_playlists: {
-        id: "spotify_playlists",
-        title: "Playlists",
-        items: spotifyPlaylistsLoading
-          ? [{ label: "Loading...", type: "action", actionId: "noop" }]
-          : spotifyPlaylists.length
-          ? spotifyPlaylists.map((p) => ({
-              label: `${p.name} (${p.trackCount})`,
-              type: "action" as const,
-              actionId: `open_playlist:${p.id}`,
+      youtube_search_results: {
+        id: "youtube_search_results",
+        title: "Search Results",
+        items: youtubeSearchResults.length
+          ? youtubeSearchResults.map((track) => ({
+              label: track.title,
+              type: "youtube_track" as const,
+              youtubeTrack: track,
             }))
-          : [{ label: "No playlists found", type: "action", actionId: "noop" }],
+          : [{ label: "(No results)", type: "action" as const, actionId: "noop" }],
       },
-      spotify_liked: {
-        id: "spotify_liked",
-        title: "Liked Songs",
-        items: spotifyLikedLoading
-          ? [{ label: "Loading...", type: "action", actionId: "noop" }]
-          : spotifyLikedTracks.map((track) => ({
-              label: track.name,
-              type: "spotify_track" as const,
-              spotifyTrack: track,
-            })),
+      youtube_playlists: {
+        id: "youtube_playlists",
+        title: "Your Playlists",
+        items: youtubePlaylistsLoading
+          ? [{ label: "Loading...", type: "action" as const, actionId: "noop" }]
+          : youtubePlaylists.length
+          ? youtubePlaylists.map((playlist) => ({
+              label: playlist.snippet?.title || "Untitled Playlist",
+              type: "action" as const,
+              actionId: `open_youtube_playlist:${playlist.id}`,
+            }))
+          : [{ label: "No playlists found", type: "action" as const, actionId: "noop" }],
       },
       ...Object.fromEntries(
-        Object.entries(spotifyPlaylistTracks).map(([playlistId, tracks]) => [
-          `spotify_playlist_${playlistId}`,
+        Object.entries(youtubePlaylistTracks).map(([playlistId, tracks]) => [
+          `youtube_playlist_${playlistId}`,
           {
-            id: `spotify_playlist_${playlistId}`,
-            title: spotifyPlaylists.find((p) => p.id === playlistId)?.name || "Playlist",
+            id: `youtube_playlist_${playlistId}`,
+            title:
+              youtubePlaylists.find((p) => p.id === playlistId)?.snippet?.title ||
+              "Playlist",
             items:
-              spotifyPlaylistTracksLoading === playlistId
+              youtubePlaylistTracksLoading === playlistId
                 ? [{ label: "Loading...", type: "action" as const, actionId: "noop" }]
-                : tracks.map((track) => ({
-                    label: track.name,
-                    type: "spotify_track" as const,
-                    spotifyTrack: track,
-                  })),
+                : tracks.length
+                ? tracks.map((track) => ({
+                    label: track.title,
+                    type: "youtube_track" as const,
+                    youtubeTrack: track,
+                  }))
+                : [{ label: "Playlist is empty", type: "action" as const, actionId: "noop" }],
           },
         ])
       ),
+
       settings: {
         id: "settings",
         title: "Settings",
@@ -926,7 +974,6 @@ export default function MobileBulletproofPlayer() {
   }, [
     currentSong,
     playbackSource,
-    spotifyNowPlaying,
     sortedLocalSongs,
     sortMode,
     hapticsOn,
@@ -934,35 +981,46 @@ export default function MobileBulletproofPlayer() {
     repeatMode,
     clock24h,
     sleepTimerEndAt,
-    spotifyConnected,
-    spotifyPlaylists,
-    spotifyPlaylistsLoading,
-    spotifyLikedTracks,
-    spotifyLikedLoading,
-    spotifyPlaylistTracks,
-    spotifyPlaylistTracksLoading,
+    youtubeAccountConnected,
+    youtubePlaylists,
+    youtubePlaylistsLoading,
+    youtubeSearchResults,
+    youtubePlaylistTracks,
+    youtubePlaylistTracksLoading,
+    youtubeCurrentTrack,
   ]);
 
   useEffect(() => {
     const activeId = menuStack[menuStack.length - 1];
-    if (!spotifyConnected) return;
 
-    if (activeId === "spotify_playlists" && !spotifyPlaylistsLoading && spotifyPlaylists.length === 0) {
-      setSpotifyPlaylistsLoading(true);
-      fetchPlaylists()
-        .then(setSpotifyPlaylists)
-        .catch(() => showSpotifyMessage("Couldn't load your playlists."))
-        .finally(() => setSpotifyPlaylistsLoading(false));
-    }
+    if (!youtubeAccountConnected) return;
 
-    if (activeId === "spotify_liked" && !spotifyLikedLoading && spotifyLikedTracks.length === 0) {
-      setSpotifyLikedLoading(true);
-      fetchSavedTracks()
-        .then(setSpotifyLikedTracks)
-        .catch(() => showSpotifyMessage("Couldn't load your liked songs."))
-        .finally(() => setSpotifyLikedLoading(false));
+    if (
+      activeId === "youtube_playlists" &&
+      !youtubePlaylistsLoading &&
+      youtubePlaylists.length === 0
+    ) {
+      setYouTubePlaylistsLoading(true);
+
+      fetch("/api/youtube/account/playlists", {
+        credentials: "include",
+      })
+        .then(async (response) => {
+          if (!response.ok) {
+            throw new Error("Unable to load playlists");
+          }
+          return response.json();
+        })
+        .then((data) => {
+          setYouTubePlaylists(data.playlists || []);
+        })
+        .catch(() => {
+          setYouTubeAccountConnected(false);
+          showYouTubeError("Couldn't load your YouTube playlists.");
+        })
+        .finally(() => setYouTubePlaylistsLoading(false));
     }
-  }, [menuStack, spotifyConnected]);
+  }, [menuStack, youtubeAccountConnected, youtubePlaylistsLoading, youtubePlaylists.length]);
 
   const currentMenuId = menuStack[menuStack.length - 1];
   const currentMenu = menus[currentMenuId] || menus.root;
@@ -1085,13 +1143,8 @@ export default function MobileBulletproofPlayer() {
       triggerHaptic("confirm", hapticsOn);
       ensureAudioGraph();
       wakeUpAudioCtx();
-      if (playbackSource === "spotify") {
-        if (!spotifyQueue.length) return;
-        const next = !spotifyIsPlaying;
-        setSpotifyIsPlaying(next);
-        runSpotifyAction(() => (next ? resumePlayback() : pausePlayback()));
-      } else {
-        if (currentSong) setIsPlaying(!isPlaying);
+      if (currentSong || youtubeCurrentTrack) {
+        setIsPlaying(!isPlaying);
       }
       return;
     }
@@ -1115,18 +1168,22 @@ export default function MobileBulletproofPlayer() {
         const songIdx = localSongs.findIndex(s => s.file === selectedItem.song?.file);
         playSong(selectedItem.song, songIdx >= 0 ? songIdx : 0);
       }
-    } else if (selectedItem?.type === "spotify_track" && selectedItem.spotifyTrack) {
+    } else if (selectedItem?.type === "youtube_track" && selectedItem.youtubeTrack) {
       const list = currentMenu.items
-        .filter((it) => it.type === "spotify_track" && it.spotifyTrack)
-        .map((it) => it.spotifyTrack!) as SpotifyTrack[];
-      const idx = list.findIndex((t) => t.uri === selectedItem.spotifyTrack!.uri);
+        .filter((it) => it.type === "youtube_track" && it.youtubeTrack)
+        .map((it) => it.youtubeTrack!) as YouTubeTrack[];
+
+      const idx = list.findIndex(
+        (track) => track.id === selectedItem.youtubeTrack!.id
+      );
+
       if (
-        playbackSource === "spotify" &&
-        spotifyQueue[spotifyQueueIndex]?.uri === selectedItem.spotifyTrack.uri
+        playbackSource === "youtube" &&
+        youtubeQueue[youtubeQueueIndex]?.id === selectedItem.youtubeTrack.id
       ) {
         setScreen("nowPlaying");
       } else {
-        playSpotifyList(list, idx >= 0 ? idx : 0);
+        playYouTubeList(list, idx >= 0 ? idx : 0);
       }
     } else if (selectedItem?.type === "action") {
       switch(selectedItem.actionId) {
@@ -1199,33 +1256,25 @@ export default function MobileBulletproofPlayer() {
         case "theme_cyberpunk": setLcdTheme("cyberpunk"); break;
         case "theme_vaporwave": setLcdTheme("vaporwave"); break;
         case "theme_midnight": setLcdTheme("midnight"); break;
+        case "youtube_search":
+          setYouTubeError("");
+          setYouTubeSearchInput("");
+          setShowYouTubeModal(true);
+          break;
+        case "youtube_sign_in":
+          window.location.href = "/api/youtube/auth/start";
+          break;
+        case "youtube_sign_out":
+          fetch("/api/youtube/auth/logout", {
+            method: "POST",
+            credentials: "include",
+          }).finally(() => {
+            setYouTubeAccountConnected(false);
+            setYouTubePlaylists([]);
+            setYouTubePlaylistTracks({});
+          });
+          break;
         case "noop":
-          break;
-        case "spotify_disconnect":
-          clearSpotifySession();
-          setSpotifyConnected(false);
-          setSpotifyPlaylists([]);
-          setSpotifyLikedTracks([]);
-          setSpotifyPlaylistTracks({});
-          if (playbackSource === "spotify") setPlaybackSource("local");
-          break;
-        case "spotify_auth": {
-          const saved = getSavedClientId();
-          if (saved) {
-            startSpotifyLogin(saved);
-          } else {
-            setSpotifyModalMode("clientId");
-            setShowSpotifyModal(true);
-          }
-          break;
-        }
-        case "spotify_reset_id":
-          clearClientId();
-          clearSpotifySession();
-          setSpotifyConnected(false);
-          setSpotifyClientIdInput("");
-          setSpotifyModalMode("clientId");
-          setShowSpotifyModal(true);
           break;
         default:
           if (selectedItem.actionId?.startsWith("delete_song:")) {
@@ -1234,19 +1283,39 @@ export default function MobileBulletproofPlayer() {
               removeSpecificSong(fileName);
             }
           }
-          else if (selectedItem.actionId?.startsWith("open_playlist:")) {
-            const playlistId = selectedItem.actionId.replace("open_playlist:", "");
+          else if (
+            selectedItem.actionId?.startsWith("open_youtube_playlist:")
+          ) {
+            const playlistId = selectedItem.actionId.replace(
+              "open_youtube_playlist:",
+              ""
+            );
+
             triggerHaptic("select", hapticsOn);
-            setMenuStack([...menuStack, `spotify_playlist_${playlistId}`]);
+            setMenuStack([
+              ...menuStack,
+              `youtube_playlist_${playlistId}`,
+            ]);
             setSelectedIndex(0);
-            if (!spotifyPlaylistTracks[playlistId]) {
-              setSpotifyPlaylistTracksLoading(playlistId);
-              fetchPlaylistTracks(playlistId)
-                .then((tracks) => {
-                  setSpotifyPlaylistTracks((prev) => ({ ...prev, [playlistId]: tracks }));
+
+            if (!youtubePlaylistTracks[playlistId]) {
+              setYouTubePlaylistTracksLoading(playlistId);
+
+              getYouTubePlaylist(playlistId)
+                .then((playlist) => {
+                  setYouTubePlaylistTracks((prev) => ({
+                    ...prev,
+                    [playlistId]: playlist.items as YouTubeTrack[],
+                  }));
                 })
-                .catch(() => showSpotifyMessage("Couldn't load that playlist."))
-                .finally(() => setSpotifyPlaylistTracksLoading(null));
+                .catch(() => {
+                  showYouTubeError(
+                    "Couldn't load that YouTube playlist."
+                  );
+                })
+                .finally(() =>
+                  setYouTubePlaylistTracksLoading(null)
+                );
             }
           }
       }
@@ -1257,14 +1326,10 @@ export default function MobileBulletproofPlayer() {
     e.stopPropagation();
     ensureAudioGraph();
     wakeUpAudioCtx();
-    if (playbackSource === "spotify") {
-      if (!spotifyQueue.length) return;
-      const next = !spotifyIsPlaying;
-      setSpotifyIsPlaying(next);
-      runSpotifyAction(() => (next ? resumePlayback() : pausePlayback()));
-      return;
+
+    if (currentSong || youtubeCurrentTrack) {
+      setIsPlaying(!isPlaying);
     }
-    if (currentSong) setIsPlaying(!isPlaying);
   };
 
   const handleMenuClick = (e: React.MouseEvent | React.TouchEvent) => {
@@ -1323,22 +1388,35 @@ export default function MobileBulletproofPlayer() {
   };
   const theme = getLcdStyle();
 
-  const isSpotifySource = playbackSource === "spotify";
-  const activeSpotifyTrack = spotifyNowPlaying?.track ?? spotifyQueue[spotifyQueueIndex];
-  const unifiedIsPlaying = isSpotifySource ? spotifyIsPlaying : isPlaying;
-  const unifiedTrackName = isSpotifySource
-    ? activeSpotifyTrack?.name ?? "No Track Selected"
+  const isYouTubeSource = playbackSource === "youtube";
+  const unifiedIsPlaying = isPlaying;
+  const unifiedTrackName = isYouTubeSource
+    ? youtubeCurrentTrack?.title ?? "No Track Selected"
     : currentSong
     ? currentSong.name
     : "No Track Selected";
-  const unifiedCurrentTime = isSpotifySource ? (spotifyNowPlaying?.progressMs ?? 0) / 1000 : currentTime;
-  const unifiedDuration = isSpotifySource ? (activeSpotifyTrack?.durationMs ?? 0) / 1000 : duration;
-  const unifiedProgress = unifiedDuration > 0 ? (unifiedCurrentTime / unifiedDuration) * 100 : 0;
+  const unifiedCurrentTime = currentTime;
+  const unifiedDuration = duration;
+  const unifiedProgress =
+    unifiedDuration > 0
+      ? (unifiedCurrentTime / unifiedDuration) * 100
+      : 0;
 
-  const coverflowItems: CoverflowItem[] = isSpotifySource
-    ? spotifyQueue.map((t) => ({ id: t.uri, name: t.name, artworkUrl: t.artworkUrl }))
-    : localSongs.map((s) => ({ id: s.name, name: s.name, artworkUrl: s.artworkUrl }));
-  const coverflowActiveIndex = isSpotifySource ? spotifyQueueIndex : currentIndex;
+  const coverflowItems: CoverflowItem[] = isYouTubeSource
+    ? youtubeQueue.map((track) => ({
+        id: track.id,
+        name: track.title,
+        artworkUrl: track.thumbnail,
+      }))
+    : localSongs.map((s) => ({
+        id: s.name,
+        name: s.name,
+        artworkUrl: s.artworkUrl,
+      }));
+
+  const coverflowActiveIndex = isYouTubeSource
+    ? youtubeQueueIndex
+    : currentIndex;
 
   return (
     <div className="fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 pt-12 pb-4">
@@ -1414,47 +1492,99 @@ export default function MobileBulletproofPlayer() {
         </div>
       )}
 
-      {showSpotifyModal && (
+      {showYouTubeModal && (
         <div className="absolute inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-6">
-          <div className={`bg-gradient-to-b ${theme.bg} ${theme.text} p-6 rounded-2xl max-w-sm w-full shadow-2xl border-2 ${theme.border}`}>
-            <h2 className="text-sm font-bold mb-4 uppercase tracking-widest text-center border-b pb-2 border-current/30">Spotify Sync</h2>
+          <div
+            className={`bg-gradient-to-b ${theme.bg} ${theme.text} p-6 rounded-2xl max-w-lg w-full shadow-2xl border-2 ${theme.border} max-h-[80vh] flex flex-col`}
+          >
+            <div className="flex items-center justify-between gap-4 mb-4">
+              <h2 className="text-sm font-bold uppercase tracking-widest">
+                YouTube Guest
+              </h2>
 
-            {spotifyModalMode === "clientId" ? (
-              <>
-                <p className="text-[11px] text-center font-semibold mb-4 leading-relaxed">
-                  One-time app setup: create a free app at developer.spotify.com/dashboard, set its Redirect URI to
-                  <span className="font-mono block mt-1 break-all">{SPOTIFY_REDIRECT_URI}</span>
-                  then paste the Client ID below.
-                </p>
-                <input
-                  type="text"
-                  value={spotifyClientIdInput}
-                  onChange={(e) => setSpotifyClientIdInput(e.target.value)}
-                  placeholder="Spotify Client ID"
-                  className="w-full mb-3 px-3 py-2 rounded-lg bg-black/10 border border-current/30 text-current placeholder:text-current/50 text-xs font-bold outline-none"
-                />
-                <button
-                  onClick={() => {
-                    if (!spotifyClientIdInput.trim()) return;
-                    saveClientId(spotifyClientIdInput);
-                    setShowSpotifyModal(false);
-                    startSpotifyLogin(spotifyClientIdInput.trim());
-                  }}
-                  className="w-full py-3 mb-2 bg-black text-white font-bold rounded-lg text-xs uppercase tracking-widest shadow-lg transition-colors cursor-pointer hover:bg-black/80"
-                >
-                  Save &amp; Connect
-                </button>
-              </>
-            ) : (
-              <p className="text-xs text-center font-bold mb-6">{spotifyModalMessage}</p>
+              <button
+                onClick={() => setShowYouTubeModal(false)}
+                className="text-xs font-bold opacity-70 hover:opacity-100"
+              >
+                CLOSE
+              </button>
+            </div>
+
+            <p className="text-[11px] font-semibold mb-4 leading-relaxed opacity-80">
+              Search YouTube and play audio directly through RetroPod.
+              No YouTube account is required for Guest mode.
+            </p>
+
+            <div className="flex gap-2 mb-4">
+              <input
+                type="text"
+                value={youtubeSearchInput}
+                onChange={(e) => setYouTubeSearchInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    handleYouTubeSearch(youtubeSearchInput);
+                  }
+                }}
+                placeholder="Search YouTube..."
+                className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-black/10 border border-current/30 text-current placeholder:text-current/50 text-xs font-bold outline-none"
+                autoFocus
+              />
+
+              <button
+                onClick={() => handleYouTubeSearch(youtubeSearchInput)}
+                disabled={youtubeSearchLoading}
+                className="px-4 py-2 bg-black text-white font-bold rounded-lg text-xs uppercase tracking-widest disabled:opacity-50"
+              >
+                {youtubeSearchLoading ? "..." : "Search"}
+              </button>
+            </div>
+
+            {youtubeError && (
+              <div className="mb-3 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-[11px] font-bold text-red-300">
+                {youtubeError}
+              </div>
             )}
 
-            <button 
-              onClick={() => setShowSpotifyModal(false)}
-              className="w-full py-3 bg-black/10 hover:bg-black/20 text-current border border-current/30 font-bold rounded-lg text-xs uppercase tracking-widest transition-colors cursor-pointer"
-            >
-              Close
-            </button>
+            <div className="overflow-y-auto flex-1 min-h-0 space-y-1">
+              {youtubeSearchResults.map((track) => (
+                <button
+                  key={track.id}
+                  onClick={() => {
+                    setShowYouTubeModal(false);
+                    playYouTubeTrack(track);
+                  }}
+                  className="w-full flex items-center gap-3 p-2 rounded-lg text-left hover:bg-black/10 transition-colors"
+                >
+                  {track.thumbnail ? (
+                    <img
+                      src={track.thumbnail}
+                      alt=""
+                      className="w-12 h-12 rounded object-cover shrink-0"
+                    />
+                  ) : (
+                    <div className="w-12 h-12 rounded bg-black/20 shrink-0" />
+                  )}
+
+                  <div className="min-w-0 flex-1">
+                    <div className="text-xs font-bold truncate">
+                      {track.title}
+                    </div>
+                    <div className="text-[10px] font-semibold opacity-60 truncate">
+                      {track.artist}
+                    </div>
+                  </div>
+
+                  <Play size={13} className="shrink-0" />
+                </button>
+              ))}
+
+              {!youtubeSearchLoading &&
+                youtubeSearchResults.length === 0 && (
+                  <div className="py-8 text-center text-[11px] font-bold opacity-50">
+                    Search for a song to get started.
+                  </div>
+                )}
+            </div>
           </div>
         </div>
       )}
@@ -1588,25 +1718,107 @@ export default function MobileBulletproofPlayer() {
                   {unifiedTrackName}
                 </p>
                 
-                <div className="w-full mt-4 flex items-center gap-3 px-2">
-                  <span className="text-[10px] font-bold tracking-wider">{formatTime(unifiedCurrentTime)}</span>
-                  <div className={`flex-1 h-[4px] rounded-sm overflow-hidden relative bg-current opacity-20`}>
-                    <div className="absolute top-0 left-0 h-full bg-current opacity-100" style={{ width: `${unifiedProgress}%` }}></div>
-                  </div>
-                  <span className="text-[10px] font-bold tracking-wider">-{formatTime(unifiedDuration - unifiedCurrentTime)}</span>
-                </div>
+              <div className="w-full mt-4 flex items-center gap-3 px-2">
+  <span className="text-[10px] font-bold tracking-wider">
+    {formatTime(unifiedCurrentTime)}
+  </span>
+
+  <div
+    className="flex-1 h-[14px] flex items-center cursor-pointer touch-none"
+    role="slider"
+    aria-label="Song progress"
+    aria-valuemin={0}
+    aria-valuemax={unifiedDuration}
+    aria-valuenow={unifiedCurrentTime}
+    tabIndex={0}
+    onPointerDown={(e) => {
+      e.stopPropagation();
+
+      if (!audioRef.current || unifiedDuration <= 0) return;
+
+      const rect = e.currentTarget.getBoundingClientRect();
+      const ratio = Math.max(
+        0,
+        Math.min(1, (e.clientX - rect.left) / rect.width)
+      );
+
+      const nextTime = ratio * unifiedDuration;
+
+      audioRef.current.currentTime = nextTime;
+      setCurrentTime(nextTime);
+      setProgress(ratio * 100);
+
+      e.currentTarget.setPointerCapture(e.pointerId);
+    }}
+    onPointerMove={(e) => {
+      e.stopPropagation();
+
+      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
+      if (!audioRef.current || unifiedDuration <= 0) return;
+
+      const rect = e.currentTarget.getBoundingClientRect();
+      const ratio = Math.max(
+        0,
+        Math.min(1, (e.clientX - rect.left) / rect.width)
+      );
+
+      const nextTime = ratio * unifiedDuration;
+
+      audioRef.current.currentTime = nextTime;
+      setCurrentTime(nextTime);
+      setProgress(ratio * 100);
+    }}
+    onPointerUp={(e) => {
+      e.stopPropagation();
+
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    }}
+    onPointerCancel={(e) => {
+      e.stopPropagation();
+
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    }}
+  >
+    <div className="w-full h-[4px] rounded-sm overflow-visible relative bg-current opacity-20">
+      <div
+        className="absolute top-0 left-0 h-full bg-current opacity-100"
+        style={{
+          width: `${Math.min(100, Math.max(0, unifiedProgress))}%`,
+        }}
+      />
+
+      <div
+        className="absolute top-1/2 -translate-y-1/2 w-[10px] h-[10px] rounded-full bg-current"
+        style={{
+          left: `calc(${Math.min(
+            100,
+            Math.max(0, unifiedProgress)
+          )}% - 5px)`,
+        }}
+      />
+    </div>
+  </div>
+
+  <span className="text-[10px] font-bold tracking-wider">
+    -{formatTime(Math.max(0, unifiedDuration - unifiedCurrentTime))}
+  </span>
+</div>
 
                 <div className="mt-3 flex gap-6 text-[9px] font-bold tracking-widest uppercase">
-                  {isSpotifySource ? (
-                    <div className={`flex items-center gap-1.5 px-2 py-0.5 border-[1.5px] ${theme.border} rounded-sm`}>
-                      <span>Spotify Connect</span>
-                    </div>
-                  ) : (
-                    <div className={`flex items-center gap-1.5 px-2 py-0.5 border-[1.5px] ${theme.border} rounded-sm`}>
-                      <RefreshCw size={10} strokeWidth={3} /> 
-                      <span>{playbackSpeed}x</span>
-                    </div>
-                  )}
+                  <div className={`flex items-center gap-1.5 px-2 py-0.5 border-[1.5px] ${theme.border} rounded-sm`}>
+                    {isYouTubeSource ? (
+                      <span>YouTube</span>
+                    ) : (
+                      <>
+                        <RefreshCw size={10} strokeWidth={3} />
+                        <span>{playbackSpeed}x</span>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
@@ -1641,7 +1853,7 @@ export default function MobileBulletproofPlayer() {
               className="w-[70%] aspect-square rounded-full bg-[#18181a] border border-black flex items-center justify-center cursor-pointer pointer-events-auto shadow-[0_5px_15px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.05)] transition-all group"
             >
               {screen === "nowPlaying" ? (
-                isPlaying ? <Pause size={20} className="text-gray-500 group-active:text-white"/> : <Play size={20} className="ml-1 text-gray-500 group-active:text-white"/>
+                unifiedIsPlaying ? <Pause size={20} className="text-gray-500 group-active:text-white"/> : <Play size={20} className="ml-1 text-gray-500 group-active:text-white"/>
               ) : (
                 <div className="w-3 h-3 rounded-full bg-gray-600/30 group-active:bg-white shadow-[inset_0_1px_2px_rgba(0,0,0,0.8)] transition-colors"></div>
               )}
@@ -1659,7 +1871,7 @@ export default function MobileBulletproofPlayer() {
             onClick={handleGlobalPlayPause}
             className="absolute bottom-[8%] text-gray-600 hover:text-white cursor-pointer pointer-events-auto z-20 transition-colors p-2"
           >
-            {isPlaying ? <Pause size={18}/> : <Play size={18} className="inline"/>}
+            {unifiedIsPlaying ? <Pause size={18}/> : <Play size={18} className="inline"/>}
           </button>
 
           <button onClick={handlePrevSong} className="absolute left-[7%] text-gray-600 hover:text-white cursor-pointer pointer-events-auto z-20 p-3">

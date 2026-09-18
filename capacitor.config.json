@@ -1,8 +1,10 @@
 {
   "appId": "com.swaminathan.retropod",
   "appName": "RetroPod",
-  "webDir": "retro-player/out",
+  "webDir": "capacitor-shell",
   "server": {
-    "androidScheme": "https"
+    "url": "https://YOUR-VERCEL-PROJECT.vercel.app",
+    "androidScheme": "https",
+    "cleartext": false
   }
 }
