@@ -3,7 +3,7 @@
   "appName": "RetroPod",
   "webDir": "capacitor-shell",
   "server": {
-    "url": "https://YOUR-VERCEL-PROJECT.vercel.app",
+    "url": "https://retro-pod.vercel.app/",
     "androidScheme": "https",
     "cleartext": false
   }
