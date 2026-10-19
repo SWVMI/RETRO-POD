@@ -1,18 +1,10 @@
 "use client";
 
-import { useState, useRef, useEffect, useMemo, useCallback } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal } from "lucide-react";
+import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal, Heart, ListPlus, X } from "lucide-react";
 import { triggerHaptic } from "@/lib/haptics";
 import AlbumCoverflow, { CoverflowItem } from "@/components/AlbumCoverflow";
-import {
-  searchYouTube,
-  getYouTubeStream,
-  getYouTubePlaylist,
-} from "@/lib/youtube-client";
-
-// --- GLOBAL AUDIO CONTEXT & HELPERS ---
-let audioCtx: AudioContext | null = null;
 
 const formatTime = (seconds: number) => {
   if (isNaN(seconds)) return "0:00";
@@ -22,26 +14,32 @@ const formatTime = (seconds: number) => {
 };
 
 type SongItem = { file: File; name: string; artworkUrl?: string };
-type YouTubeTrack = {
-  id: string;
-  title: string;
-  artist: string;
-  album?: string;
-  duration: number;
-  thumbnail: string;
-  source: "youtube";
+const lcdThemes = [
+  "sepia", "blue", "green", "amber", "gray", "pink", "purple", "teal", "white",
+  "red", "oled-red", "oled-amber", "oled-green", "oled-cyan", "oled-magenta",
+  "cyberpunk", "vaporwave", "midnight", "arctic", "copper", "forest",
+  "graphite", "champagne", "burgundy", "rose-gold", "sage", "alpine",
+  "ocean-depths", "aurora", "cobalt", "amethyst", "ember", "jade",
+  "inverted", "solarized",
+] as const;
+type LcdTheme = (typeof lcdThemes)[number];
+type DirectoryHandleWithIteration = FileSystemDirectoryHandle & {
+  entries: () => AsyncIterableIterator<[string, FileSystemFileHandle | FileSystemDirectoryHandle]>;
+  keys: () => AsyncIterableIterator<string>;
+};
+type BatteryManagerLike = EventTarget & { level: number; charging: boolean };
+type NavigatorWithBattery = Navigator & {
+  getBattery?: () => Promise<BatteryManagerLike>;
 };
 
 type MenuItem = {
   label: string;
-  type: "menu" | "action" | "song" | "youtube_track";
+  type: "menu" | "action" | "song";
   targetId?: string;
   actionId?: string;
   song?: SongItem;
-  youtubeTrack?: YouTubeTrack;
 };
 type Menu = { id: string; title: string; items: MenuItem[] };
-type PlaybackSource = "local" | "youtube";
 
 export default function MobileBulletproofPlayer() {
   const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
@@ -49,25 +47,8 @@ export default function MobileBulletproofPlayer() {
   const [currentTimeStr, setCurrentTimeStr] = useState("12:00");
   const [showOnboarding, setShowOnboarding] = useState(false);
   
-  // YouTube state
-  const [showYouTubeModal, setShowYouTubeModal] = useState(false);
-  const [youtubeSearchInput, setYouTubeSearchInput] = useState("");
-  const [youtubeSearchResults, setYouTubeSearchResults] = useState<YouTubeTrack[]>([]);
-  const [youtubeSearchLoading, setYouTubeSearchLoading] = useState(false);
-  const [youtubeError, setYouTubeError] = useState("");
-  const [youtubeAccountConnected, setYouTubeAccountConnected] = useState(false);
-  const [youtubePlaylists, setYouTubePlaylists] = useState<any[]>([]);
-  const [youtubePlaylistsLoading, setYouTubePlaylistsLoading] = useState(false);
-  const [youtubePlaylistTracks, setYouTubePlaylistTracks] = useState<Record<string, YouTubeTrack[]>>({});
-  const [youtubePlaylistTracksLoading, setYouTubePlaylistTracksLoading] = useState<string | null>(null);
-  const [youtubeQueue, setYouTubeQueue] = useState<YouTubeTrack[]>([]);
-  const [youtubeQueueIndex, setYouTubeQueueIndex] = useState(0);
-  const [youtubeCurrentTrack, setYouTubeCurrentTrack] = useState<YouTubeTrack | null>(null);
-
   // Settings
-  const [lcdTheme, setLcdTheme] = useState<
-    "sepia" | "blue" | "green" | "amber" | "gray" | "pink" | "purple" | "teal" | "white" | "red" | "oled-red" | "oled-amber" | "oled-green" | "oled-cyan" | "oled-magenta" | "cyberpunk" | "vaporwave" | "midnight"
-  >("sepia");
+  const [lcdTheme, setLcdTheme] = useState<LcdTheme>("sepia");
   const [hapticsOn, setHapticsOn] = useState(true);
   const [shuffleOn, setShuffleOn] = useState(false);
   const [repeatMode, setRepeatMode] = useState<"off" | "one" | "all">("all");
@@ -80,21 +61,23 @@ export default function MobileBulletproofPlayer() {
   const [volOverlay, setVolOverlay] = useState<number | null>(null);
   const [eqGains, setEqGains] = useState<number[]>([0, 0, 0, 0, 0]);
   const [eqEditMode, setEqEditMode] = useState(false);
-
-  // --- UNIFIED PLAYBACK STATE ---
-  const [playbackSource, setPlaybackSource] = useState<PlaybackSource>("local");
+  const eqGainsRef = useRef(eqGains);
 
   // References
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const filtersRef = useRef<BiquadFilterNode[]>([]);
+  const audioObjectUrlRef = useRef<string | null>(null);
+  const playbackRequestRef = useRef(0);
   
   const [localSongs, setLocalSongs] = useState<SongItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
   const [currentSong, setCurrentSong] = useState<SongItem | null>(null);
+  const [favoriteSongNames, setFavoriteSongNames] = useState<string[]>([]);
+  const [queuedSongNames, setQueuedSongNames] = useState<string[]>([]);
+  const [libraryPreferencesLoaded, setLibraryPreferencesLoaded] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [progress, setProgress] = useState(0);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
@@ -114,28 +97,32 @@ export default function MobileBulletproofPlayer() {
   
   const clock24hRef = useRef(clock24h);
   const sleepTimerEndAtRef = useRef<number | null>(null);
-  const playbackSourceRef = useRef<PlaybackSource>("local");
   const repeatModeRef = useRef<"off" | "one" | "all">("all");
   const shuffleOnRef = useRef(false);
   const localSongsRef = useRef<SongItem[]>([]);
+  const queuedSongNamesRef = useRef<string[]>([]);
   const currentIndexRef = useRef(0);
   const isPlayingRef = useRef(false);
-  const youtubePlaybackRequestRef = useRef(0);
 
   useEffect(() => { clock24hRef.current = clock24h; }, [clock24h]);
   useEffect(() => { sleepTimerEndAtRef.current = sleepTimerEndAt; }, [sleepTimerEndAt]);
-  useEffect(() => { playbackSourceRef.current = playbackSource; }, [playbackSource]);
   useEffect(() => { repeatModeRef.current = repeatMode; }, [repeatMode]);
   useEffect(() => { shuffleOnRef.current = shuffleOn; }, [shuffleOn]);
   useEffect(() => { localSongsRef.current = localSongs; }, [localSongs]);
+  useEffect(() => { queuedSongNamesRef.current = queuedSongNames; }, [queuedSongNames]);
   useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
+  useEffect(() => { eqGainsRef.current = eqGains; }, [eqGains]);
 
   // --- AUDIO ENGINE INIT & EQ ROUTING ---
   const ensureAudioGraph = () => {
     if (!audioRef.current || sourceNodeRef.current) return;
     try {
-      const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const AudioContextConstructor =
+        window.AudioContext ||
+        (window as Window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextConstructor) throw new Error("Web Audio is not supported.");
+      const ctx = new AudioContextConstructor();
       audioCtxRef.current = ctx;
       
       const source = ctx.createMediaElementSource(audioRef.current);
@@ -166,7 +153,36 @@ export default function MobileBulletproofPlayer() {
 
   const wakeUpAudioCtx = () => {
     if (audioCtxRef.current?.state === 'suspended') {
-      audioCtxRef.current.resume();
+      audioCtxRef.current.resume().catch((error) => {
+        console.warn("Unable to resume audio context:", error);
+      });
+    }
+  };
+
+  const setAudioSource = (file: File) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    audio.pause();
+    if (audioObjectUrlRef.current) {
+      URL.revokeObjectURL(audioObjectUrlRef.current);
+    }
+    audioObjectUrlRef.current = URL.createObjectURL(file);
+    audio.src = audioObjectUrlRef.current;
+    audio.load();
+  };
+
+  const releaseAudioSource = () => {
+    playbackRequestRef.current += 1;
+    const audio = audioRef.current;
+    audio?.pause();
+    if (audio) {
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    if (audioObjectUrlRef.current) {
+      URL.revokeObjectURL(audioObjectUrlRef.current);
+      audioObjectUrlRef.current = null;
     }
   };
 
@@ -332,10 +348,9 @@ export default function MobileBulletproofPlayer() {
 
   const loadPersistedSongs = async () => {
     try {
-      const root = await navigator.storage.getDirectory();
+      const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
       const loadedSongs: SongItem[] = [];
-      // @ts-ignore
-      for await (const [name, handle] of root.entries()) {
+      for await (const [, handle] of root.entries()) {
         if (handle.kind === 'file') {
           const file = await handle.getFile();
           const artworkUrl = await extractArtwork(file);
@@ -343,36 +358,39 @@ export default function MobileBulletproofPlayer() {
         }
       }
       
-      if (loadedSongs.length > 0) {
-        setLocalSongs(loadedSongs);
-        const lastSongName = localStorage.getItem("retro_last_song_name");
-        if (lastSongName) {
-          const foundIdx = loadedSongs.findIndex(s => s.name === lastSongName);
-          if (foundIdx !== -1) {
-            setCurrentSong(loadedSongs[foundIdx]);
-            setCurrentIndex(foundIdx);
-            setPlaybackSource("local");
-            if (audioRef.current) {
-              audioRef.current.src = URL.createObjectURL(loadedSongs[foundIdx].file);
-              audioRef.current.load();
-              audioRef.current.addEventListener('loadedmetadata', function restoreTime() {
-                const lastTime = parseFloat(localStorage.getItem("retro_last_time") || "0");
-                if (audioRef.current) audioRef.current.currentTime = lastTime;
-                setCurrentTime(lastTime);
-                audioRef.current?.removeEventListener('loadedmetadata', restoreTime);
-              });
-            }
+      setLocalSongs(loadedSongs);
+      const availableFileNames = new Set(loadedSongs.map((song) => song.file.name));
+      setFavoriteSongNames((previous) => previous.filter((name) => availableFileNames.has(name)));
+      const validQueue = queuedSongNamesRef.current.filter((name) => availableFileNames.has(name));
+      queuedSongNamesRef.current = validQueue;
+      setQueuedSongNames(validQueue);
+      const lastSongName = localStorage.getItem("retro_last_song_name");
+      if (lastSongName) {
+        const foundIdx = loadedSongs.findIndex(s => s.name === lastSongName);
+        if (foundIdx !== -1) {
+          setCurrentSong(loadedSongs[foundIdx]);
+          setCurrentIndex(foundIdx);
+          if (audioRef.current) {
+            setAudioSource(loadedSongs[foundIdx].file);
+            audioRef.current.addEventListener('loadedmetadata', function restoreTime() {
+              const lastTime = parseFloat(localStorage.getItem("retro_last_time") || "0");
+              if (audioRef.current && Number.isFinite(lastTime)) {
+                audioRef.current.currentTime = Math.min(lastTime, audioRef.current.duration || lastTime);
+                setCurrentTime(audioRef.current.currentTime);
+              }
+              audioRef.current?.removeEventListener('loadedmetadata', restoreTime);
+            });
           }
         }
       }
-    } catch (e) {
+    } catch {
       console.log("No persistent storage cache found.");
     }
   };
 
   const saveSongsToStorage = async (files: File[]) => {
     try {
-      const root = await navigator.storage.getDirectory();
+      const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
       for (const file of files) {
         const handle = await root.getFileHandle(file.name, { create: true });
         const writable = await handle.createWritable();
@@ -386,21 +404,22 @@ export default function MobileBulletproofPlayer() {
 
   const clearLocalLibrary = async () => {
     try {
-      const root = await navigator.storage.getDirectory();
-      // @ts-ignore
+      const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
       for await (const name of root.keys()) {
         await root.removeEntry(name).catch(() => {});
       }
     } catch (e) {
       console.log("Storage error", e);
     }
+    releaseAudioSource();
     setLocalSongs([]);
-    if (playbackSource === "local") {
-      setIsPlaying(false);
-      setCurrentSong(null);
-      setCurrentIndex(0);
-      setScreen("menu");
-    }
+    setFavoriteSongNames([]);
+    queuedSongNamesRef.current = [];
+    setQueuedSongNames([]);
+    setIsPlaying(false);
+    setCurrentSong(null);
+    setCurrentIndex(0);
+    setScreen("menu");
   };
 
   const removeSpecificSong = async (fileName: string) => {
@@ -411,32 +430,51 @@ export default function MobileBulletproofPlayer() {
       console.log("Could not remove file", e);
     }
     setLocalSongs(prev => prev.filter(s => s.file.name !== fileName));
+    setFavoriteSongNames((previous) => previous.filter((name) => name !== fileName));
+    setQueuedSongNames((previous) => {
+      const next = previous.filter((name) => name !== fileName);
+      queuedSongNamesRef.current = next;
+      return next;
+    });
     if (currentSong?.file.name === fileName) {
+      releaseAudioSource();
       setIsPlaying(false);
       setCurrentSong(null);
       setScreen("menu");
+    } else if (currentSong) {
+      const nextIndex = localSongs
+        .filter((song) => song.file.name !== fileName)
+        .findIndex((song) => song.file.name === currentSong.file.name);
+      if (nextIndex >= 0) setCurrentIndex(nextIndex);
     }
   };
 
   const playSong = (song: SongItem, index: number) => {
-    ensureAudioGraph();
-    wakeUpAudioCtx();
+    if (sourceNodeRef.current || eqGainsRef.current.some((gain) => gain !== 0)) {
+      ensureAudioGraph();
+      wakeUpAudioCtx();
+    }
 
     const audio = audioRef.current;
-    setPlaybackSource("local");
     setCurrentSong(song);
     setCurrentIndex(index);
     setScreen("nowPlaying");
+    const requestId = ++playbackRequestRef.current;
+    if (queuedSongNamesRef.current.includes(song.file.name)) {
+      const nextQueue = queuedSongNamesRef.current.filter((name) => name !== song.file.name);
+      queuedSongNamesRef.current = nextQueue;
+      setQueuedSongNames(nextQueue);
+    }
 
     if (audio) {
-      audio.pause();
-      audio.src = URL.createObjectURL(song.file);
-      audio.load();
+      setAudioSource(song.file);
       audio.playbackRate = playbackSpeed;
       audio.play().then(() => {
+        if (requestId !== playbackRequestRef.current) return;
         isPlayingRef.current = true;
         setIsPlaying(true);
       }).catch((error) => {
+        if (requestId !== playbackRequestRef.current) return;
         console.error("Local playback failed:", error);
         isPlayingRef.current = false;
         setIsPlaying(false);
@@ -447,94 +485,6 @@ export default function MobileBulletproofPlayer() {
     }
   };
 
-  const showYouTubeError = (message: string) => {
-    setYouTubeError(message);
-  };
-
-  const handleYouTubeSearch = async (query: string) => {
-    const cleanQuery = query.trim();
-    if (!cleanQuery) return;
-
-    setYouTubeSearchLoading(true);
-    setYouTubeError("");
-
-    try {
-      const results = await searchYouTube(cleanQuery);
-      setYouTubeSearchResults(results as YouTubeTrack[]);
-      setShowYouTubeModal(true);
-    } catch (error) {
-      console.error("YouTube search failed:", error);
-      showYouTubeError("Couldn't search YouTube. Please try again.");
-    } finally {
-      setYouTubeSearchLoading(false);
-    }
-  };
-
-  const playYouTubeList = async (list: YouTubeTrack[], index: number) => {
-    if (!list.length || !list[index]) return;
-
-    const track = list[index];
-    const requestId = ++youtubePlaybackRequestRef.current;
-
-    try {
-      ensureAudioGraph();
-      wakeUpAudioCtx();
-
-      const audio = audioRef.current;
-      if (!audio) return;
-
-      // Stop the previous track immediately. The request id prevents an older
-      // stream lookup from replacing a newer queue selection.
-      audio.pause();
-      isPlayingRef.current = false;
-      setIsPlaying(false);
-
-      setCurrentSong(null);
-      setPlaybackSource("youtube");
-      setYouTubeQueue(list);
-      setYouTubeQueueIndex(index);
-      setYouTubeCurrentTrack(track);
-      setScreen("nowPlaying");
-
-      const stream = await getYouTubeStream(track.id);
-
-      // User selected another track while this stream was resolving.
-      if (requestId !== youtubePlaybackRequestRef.current) return;
-
-      const currentAudio = audioRef.current;
-      if (!currentAudio) return;
-
-      currentAudio.pause();
-      currentAudio.src = stream.url;
-      currentAudio.load();
-      currentAudio.playbackRate = playbackSpeed;
-
-      await currentAudio.play();
-
-      // Make sure a stale request cannot mark the new track as playing.
-      if (requestId !== youtubePlaybackRequestRef.current) {
-        currentAudio.pause();
-        return;
-      }
-
-      isPlayingRef.current = true;
-      setIsPlaying(true);
-      triggerHaptic("select", hapticsOn);
-    } catch (error) {
-      if (requestId !== youtubePlaybackRequestRef.current) return;
-      console.error("YouTube playback failed:", error);
-      isPlayingRef.current = false;
-      setIsPlaying(false);
-      showYouTubeError("Couldn't play this YouTube track.");
-    }
-  };
-
-  const playYouTubeTrack = (track: YouTubeTrack) => {
-    const queue = youtubeSearchResults.length ? youtubeSearchResults : [track];
-    const index = Math.max(0, queue.findIndex((item) => item.id === track.id));
-    return playYouTubeList(queue, index);
-  };
-
   const pickRandomIndex = (length: number, exclude: number) => {
     if (length <= 1) return 0;
     let idx = exclude;
@@ -542,85 +492,85 @@ export default function MobileBulletproofPlayer() {
     return idx;
   };
 
-  const handleNextSong = () => {
-    if (playbackSource === "youtube") {
-      if (!youtubeQueue.length) return;
+  const toggleFavorite = (song: SongItem) => {
+    setFavoriteSongNames((previous) =>
+      previous.includes(song.file.name)
+        ? previous.filter((name) => name !== song.file.name)
+        : [...previous, song.file.name]
+    );
+    triggerHaptic("select", hapticsOn);
+  };
 
-      const nextIdx = shuffleOn
-        ? pickRandomIndex(youtubeQueue.length, youtubeQueueIndex)
-        : (youtubeQueueIndex + 1) % youtubeQueue.length;
+  const enqueueSong = (song: SongItem) => {
+    setQueuedSongNames((previous) => {
+      if (previous.includes(song.file.name)) return previous;
+      const next = [...previous, song.file.name];
+      queuedSongNamesRef.current = next;
+      return next;
+    });
+    triggerHaptic("select", hapticsOn);
+  };
 
-      playYouTubeList(youtubeQueue, nextIdx);
-      return;
+  const removeQueuedSong = (fileName: string) => {
+    setQueuedSongNames((previous) => {
+      const next = previous.filter((name) => name !== fileName);
+      queuedSongNamesRef.current = next;
+      return next;
+    });
+  };
+
+  const playNextQueuedSong = () => {
+    const queue = [...queuedSongNamesRef.current];
+    const songs = localSongsRef.current;
+    const queuedIndex = queue.findIndex((name) => songs.some((song) => song.file.name === name));
+
+    if (queuedIndex === -1) {
+      if (queue.length > 0) {
+        queuedSongNamesRef.current = [];
+        setQueuedSongNames([]);
+      }
+      return false;
     }
 
+    const [fileName] = queue.splice(queuedIndex, 1);
+    queuedSongNamesRef.current = [...queue];
+    setQueuedSongNames([...queue]);
+
+    const songIndex = songs.findIndex((song) => song.file.name === fileName);
+    playSong(songs[songIndex], songIndex);
+    return true;
+  };
+
+  const handleNextSong = () => {
+    if (playNextQueuedSong()) return;
     if (localSongs.length === 0) return;
     const nextIdx = shuffleOn ? pickRandomIndex(localSongs.length, currentIndex) : (currentIndex + 1) % localSongs.length;
     playSong(localSongs[nextIdx], nextIdx);
   };
 
   const handlePrevSong = () => {
-    if (playbackSource === "youtube") {
-      if (!youtubeQueue.length) return;
-
-      const prevIdx =
-        (youtubeQueueIndex - 1 + youtubeQueue.length) %
-        youtubeQueue.length;
-
-      playYouTubeList(youtubeQueue, prevIdx);
-      return;
-    }
-
     if (localSongs.length === 0) return;
     const prevIdx = (currentIndex - 1 + localSongs.length) % localSongs.length;
     playSong(localSongs[prevIdx], prevIdx);
   };
 
   const handleTrackEnded = () => {
-    if (playbackSourceRef.current === "youtube") {
-      if (repeatModeRef.current === "one" && audioRef.current) {
-        audioRef.current.currentTime = 0;
-        audioRef.current.play().catch(() => {});
-        return;
-      }
-
-      if (!youtubeQueue.length) {
-        setIsPlaying(false);
-        return;
-      }
-
-      if (shuffleOnRef.current) {
-        const nextIdx = pickRandomIndex(
-          youtubeQueue.length,
-          youtubeQueueIndex
-        );
-        playYouTubeList(youtubeQueue, nextIdx);
-        return;
-      }
-
-      const isLast = youtubeQueueIndex === youtubeQueue.length - 1;
-
-      if (isLast && repeatModeRef.current === "off") {
-        setIsPlaying(false);
-        return;
-      }
-
-      const nextIdx =
-        (youtubeQueueIndex + 1) % youtubeQueue.length;
-
-      playYouTubeList(youtubeQueue, nextIdx);
-      return;
-    }
-
     if (repeatModeRef.current === "one") {
       if (audioRef.current) {
         audioRef.current.currentTime = 0;
-        audioRef.current.play().catch(() => {});
+        const requestId = playbackRequestRef.current;
+        audioRef.current.play().catch((error) => {
+          if (requestId !== playbackRequestRef.current) return;
+          console.error("Unable to repeat the current track:", error);
+          setIsPlaying(false);
+        });
       }
       return;
     }
 
     if (localSongsRef.current.length === 0) return;
+
+    if (playNextQueuedSong()) return;
 
     if (shuffleOnRef.current) {
       const nextIdx = pickRandomIndex(localSongsRef.current.length, currentIndexRef.current);
@@ -638,23 +588,28 @@ export default function MobileBulletproofPlayer() {
     playSong(localSongsRef.current[nextIdx], nextIdx);
   };
 
+  const latestNextSong = useRef(handleNextSong);
+  const latestPrevSong = useRef(handlePrevSong);
   const latestTrackEnded = useRef(handleTrackEnded);
+  const latestLoadPersistedSongs = useRef(loadPersistedSongs);
+  const latestEnsureAudioGraph = useRef(ensureAudioGraph);
   useEffect(() => {
+    latestNextSong.current = handleNextSong;
+    latestPrevSong.current = handlePrevSong;
     latestTrackEnded.current = handleTrackEnded;
+    latestLoadPersistedSongs.current = loadPersistedSongs;
+    latestEnsureAudioGraph.current = ensureAudioGraph;
   });
 
   // --- INITIALIZATION EFFECTS ---
   useEffect(() => {
-    import('@capacitor/status-bar').then(({ StatusBar }) => {
-      StatusBar.hide().catch(() => {});
-      StatusBar.setOverlaysWebView({ overlay: true }).catch(() => {});
-    }).catch(() => {});
-
     const hasSeenOnboard = localStorage.getItem("retro_onboarded");
     if (!hasSeenOnboard) setShowOnboarding(true);
 
     const savedTheme = localStorage.getItem("retro_theme");
-    if (savedTheme) setLcdTheme(savedTheme as any);
+    if (savedTheme && lcdThemes.some((theme) => theme === savedTheme)) {
+      setLcdTheme(savedTheme as LcdTheme);
+    }
     
     const savedHaptics = localStorage.getItem("retro_haptics");
     if (savedHaptics !== null) setHapticsOn(savedHaptics === "true");
@@ -666,15 +621,49 @@ export default function MobileBulletproofPlayer() {
     if (savedShuffle !== null) setShuffleOn(savedShuffle === "true");
 
     const savedRepeat = localStorage.getItem("retro_repeat");
-    if (savedRepeat) setRepeatMode(savedRepeat as any);
+    if (savedRepeat === "off" || savedRepeat === "one" || savedRepeat === "all") {
+      setRepeatMode(savedRepeat);
+    }
 
     const savedClock = localStorage.getItem("retro_clock24");
     if (savedClock !== null) setClock24h(savedClock === "true");
 
     const savedEQ = localStorage.getItem("retro_eq_gains");
     if (savedEQ) {
-      try { setEqGains(JSON.parse(savedEQ)); } catch (e) {}
+      try {
+        const gains: unknown = JSON.parse(savedEQ);
+        if (
+          Array.isArray(gains) &&
+          gains.length === 5 &&
+          gains.every((gain) => typeof gain === "number" && Number.isFinite(gain))
+        ) {
+          setEqGains(gains);
+        }
+      } catch (error) {
+        console.warn("Unable to restore equalizer settings:", error);
+      }
     }
+
+    const savedFavorites = localStorage.getItem("retro_favorites");
+    const savedQueue = localStorage.getItem("retro_queue");
+    try {
+      if (savedFavorites) {
+        const parsed = JSON.parse(savedFavorites);
+        if (Array.isArray(parsed) && parsed.every((name) => typeof name === "string")) {
+          setFavoriteSongNames(parsed);
+        }
+      }
+      if (savedQueue) {
+        const parsed = JSON.parse(savedQueue);
+        if (Array.isArray(parsed) && parsed.every((name) => typeof name === "string")) {
+          setQueuedSongNames(parsed);
+          queuedSongNamesRef.current = parsed;
+        }
+      }
+    } catch (error) {
+      console.warn("Unable to restore favorites or queue:", error);
+    }
+    setLibraryPreferencesLoaded(true);
 
     const updateClock = () => {
       const now = new Date();
@@ -687,7 +676,7 @@ export default function MobileBulletproofPlayer() {
         setSleepTimerEndAt(null);
       }
 
-      if (audioRef.current && !audioRef.current.paused && playbackSourceRef.current === "local") {
+      if (audioRef.current && !audioRef.current.paused) {
         localStorage.setItem("retro_last_time", audioRef.current.currentTime.toString());
       }
     };
@@ -710,63 +699,89 @@ export default function MobileBulletproofPlayer() {
     
     const handleTimeUpdate = () => {
       setCurrentTime(audio.currentTime);
-      setProgress((audio.currentTime / audio.duration) * 100 || 0);
+      if (
+        "mediaSession" in navigator &&
+        typeof navigator.mediaSession.setPositionState === "function" &&
+        Number.isFinite(audio.duration) &&
+        audio.duration > 0
+      ) {
+        navigator.mediaSession.setPositionState({
+          duration: audio.duration,
+          playbackRate: audio.playbackRate,
+          position: Math.min(audio.currentTime, audio.duration),
+        });
+      }
     };
     
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('volumechange', handleVolume);
-    audio.addEventListener('loadedmetadata', () => setDuration(audio.duration || 0));
-    audio.addEventListener('ended', () => latestTrackEnded.current());
+    const handleLoadedMetadata = () => {
+      setDuration(Number.isFinite(audio.duration) ? audio.duration : 0);
+    };
 
-    loadPersistedSongs();
+    const handleEnded = () => {
+      latestTrackEnded.current();
+    };
 
-    if ('getBattery' in navigator) {
-      // @ts-ignore
-      navigator.getBattery().then((battery: any) => {
+    audio.addEventListener("timeupdate", handleTimeUpdate);
+    audio.addEventListener("volumechange", handleVolume);
+    audio.addEventListener("loadedmetadata", handleLoadedMetadata);
+    audio.addEventListener("ended", handleEnded);
+
+    void latestLoadPersistedSongs.current();
+
+    let batteryManager: BatteryManagerLike | null = null;
+    let cancelled = false;
+    const batteryNavigator = navigator as NavigatorWithBattery;
+    const handleBatteryLevelChange = () => {
+      if (batteryManager) setBatteryLevel(batteryManager.level * 100);
+    };
+    const handleBatteryChargingChange = () => {
+      if (batteryManager) setIsCharging(batteryManager.charging);
+    };
+
+    if (batteryNavigator.getBattery) {
+      batteryNavigator.getBattery().then((battery) => {
+        if (cancelled) return;
+        batteryManager = battery;
         setBatteryLevel(battery.level * 100);
         setIsCharging(battery.charging);
-        
-        if (typeof battery.addEventListener === 'function') {
-          battery.addEventListener('levelchange', () => setBatteryLevel(battery.level * 100));
-          battery.addEventListener('chargingchange', () => setIsCharging(battery.charging));
-        } else {
-          battery.onlevelchange = () => setBatteryLevel(battery.level * 100);
-          battery.onchargingchange = () => setIsCharging(battery.charging);
-        }
+        battery.addEventListener("levelchange", handleBatteryLevelChange);
+        battery.addEventListener("chargingchange", handleBatteryChargingChange);
+      }).catch((error) => {
+        console.warn("Unable to read battery status:", error);
+        setBatteryLevel(100);
       });
     } else {
       setBatteryLevel(100); 
     }
 
     return () => {
+      cancelled = true;
       clearInterval(clockInterval);
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
-      audio.removeEventListener('volumechange', handleVolume);
+      audio.removeEventListener("timeupdate", handleTimeUpdate);
+      audio.removeEventListener("volumechange", handleVolume);
+      audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
+      audio.removeEventListener("ended", handleEnded);
+      batteryManager?.removeEventListener("levelchange", handleBatteryLevelChange);
+      batteryManager?.removeEventListener("chargingchange", handleBatteryChargingChange);
     };
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
-    const checkYouTubeAccount = async () => {
-      try {
-        const response = await fetch("/api/youtube/account/playlists", {
-          credentials: "include",
+    const resumePlayback = () => {
+      if (document.visibilityState !== "visible" || !isPlayingRef.current) return;
+      wakeUpAudioCtx();
+      if (audioRef.current?.paused) {
+        const requestId = playbackRequestRef.current;
+        audioRef.current.play().catch((error) => {
+          if (requestId !== playbackRequestRef.current) return;
+          console.error("Unable to resume local playback:", error);
+          setIsPlaying(false);
         });
-
-        if (!cancelled) {
-          setYouTubeAccountConnected(response.ok);
-        }
-      } catch {
-        if (!cancelled) setYouTubeAccountConnected(false);
       }
     };
 
-    checkYouTubeAccount();
-
-    return () => {
-      cancelled = true;
-    };
+    document.addEventListener("visibilitychange", resumePlayback);
+    return () => document.removeEventListener("visibilitychange", resumePlayback);
   }, []);
 
   useEffect(() => { localStorage.setItem("retro_theme", lcdTheme); }, [lcdTheme]);
@@ -776,12 +791,22 @@ export default function MobileBulletproofPlayer() {
   useEffect(() => { localStorage.setItem("retro_repeat", repeatMode); }, [repeatMode]);
   useEffect(() => { localStorage.setItem("retro_clock24", String(clock24h)); }, [clock24h]);
   useEffect(() => { localStorage.setItem("retro_eq_gains", JSON.stringify(eqGains)); }, [eqGains]);
+  useEffect(() => {
+    if (libraryPreferencesLoaded) {
+      localStorage.setItem("retro_favorites", JSON.stringify(favoriteSongNames));
+    }
+  }, [favoriteSongNames, libraryPreferencesLoaded]);
+  useEffect(() => {
+    if (libraryPreferencesLoaded) {
+      localStorage.setItem("retro_queue", JSON.stringify(queuedSongNames));
+    }
+  }, [queuedSongNames, libraryPreferencesLoaded]);
 
   useEffect(() => {
-    if (currentSong && playbackSource === "local") {
+    if (currentSong) {
       localStorage.setItem("retro_last_song_name", currentSong.name);
     }
-  }, [currentSong, playbackSource]);
+  }, [currentSong]);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = playbackSpeed;
@@ -789,10 +814,15 @@ export default function MobileBulletproofPlayer() {
 
   useEffect(() => {
     isPlayingRef.current = isPlaying;
+    if ("mediaSession" in navigator) {
+      navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
+    }
 
     if (isPlaying) {
-      ensureAudioGraph();
-      wakeUpAudioCtx();
+      if (sourceNodeRef.current || eqGainsRef.current.some((gain) => gain !== 0)) {
+        latestEnsureAudioGraph.current();
+        wakeUpAudioCtx();
+      }
       audioRef.current?.play().catch(e => console.log("Playback prevented:", e));
     } else {
       audioRef.current?.pause();
@@ -802,36 +832,34 @@ export default function MobileBulletproofPlayer() {
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
 
-    const title = playbackSource === "youtube"
-      ? youtubeCurrentTrack?.title
-      : currentSong?.name;
-
-    if (!title) return;
-
-    const artist = playbackSource === "youtube"
-      ? youtubeCurrentTrack?.artist || "YouTube"
-      : "Local Device Library";
-
-    const artworkUrl = playbackSource === "youtube"
-      ? youtubeCurrentTrack?.thumbnail
-      : currentSong?.artworkUrl;
+    if (!currentSong) {
+      navigator.mediaSession.metadata = null;
+      navigator.mediaSession.setActionHandler("play", null);
+      navigator.mediaSession.setActionHandler("pause", null);
+      navigator.mediaSession.setActionHandler("previoustrack", null);
+      navigator.mediaSession.setActionHandler("nexttrack", null);
+      navigator.mediaSession.setActionHandler("seekto", null);
+      return;
+    }
 
     navigator.mediaSession.metadata = new MediaMetadata({
-      title,
-      artist,
-      album: playbackSource === "youtube"
-        ? youtubeCurrentTrack?.album || "YouTube"
-        : "Retro Custom Player",
-      artwork: artworkUrl
-        ? [{ src: artworkUrl, sizes: "512x512", type: "image/jpeg" }]
+      title: currentSong.name,
+      artist: "Local Device Library",
+      album: "Retro Custom Player",
+      artwork: currentSong.artworkUrl
+        ? [{ src: currentSong.artworkUrl, sizes: "512x512", type: "image/jpeg" }]
         : [],
     });
 
     navigator.mediaSession.setActionHandler("play", () => setIsPlaying(true));
     navigator.mediaSession.setActionHandler("pause", () => setIsPlaying(false));
-    navigator.mediaSession.setActionHandler("previoustrack", handlePrevSong);
-    navigator.mediaSession.setActionHandler("nexttrack", handleNextSong);
-  }, [currentSong, youtubeCurrentTrack, playbackSource, localSongs, currentIndex, youtubeQueueIndex]);
+    navigator.mediaSession.setActionHandler("previoustrack", () => latestPrevSong.current());
+    navigator.mediaSession.setActionHandler("nexttrack", () => latestNextSong.current());
+    navigator.mediaSession.setActionHandler("seekto", (details) => {
+      if (!audioRef.current || details.seekTime === undefined) return;
+      audioRef.current.currentTime = Math.max(0, Math.min(details.seekTime, audioRef.current.duration || details.seekTime));
+    });
+  }, [currentSong, localSongs, currentIndex]);
 
   const sortedLocalSongs = useMemo(() => {
     if (sortMode === "a-z") return [...localSongs].sort((a, b) => a.name.localeCompare(b.name));
@@ -841,19 +869,37 @@ export default function MobileBulletproofPlayer() {
 
   // --- MENUS & UI LOGIC ---
   const menus = useMemo((): Record<string, Menu> => {
-    const isReadyToPlay = currentSong || youtubeCurrentTrack;
+    const favoriteSongs = favoriteSongNames
+      .map((name) => localSongs.find((song) => song.file.name === name))
+      .filter((song): song is SongItem => song !== undefined);
+    const queuedSongs = queuedSongNames
+      .map((name) => localSongs.find((song) => song.file.name === name))
+      .filter((song): song is SongItem => song !== undefined);
 
     return {
       root: {
         id: "root",
         title: "Main Menu",
         items: [
-          ...(isReadyToPlay ? [{ label: "Now Playing", type: "action" as const, actionId: "go_now_playing" }] : []),
+          ...(currentSong ? [{ label: "Now Playing", type: "action" as const, actionId: "go_now_playing" }] : []),
           { label: "Local Audio Library", type: "menu", targetId: "local" },
-          { label: "YouTube Music", type: "menu", targetId: "youtube" },
           { label: "Playback Tools", type: "menu", targetId: "tools" },
           { label: "System Settings", type: "menu", targetId: "settings" }
         ]
+      },
+      favorites: {
+        id: "favorites",
+        title: "Favorites",
+        items: favoriteSongs.length
+          ? favoriteSongs.map((song) => ({ label: song.name, type: "song" as const, song }))
+          : [{ label: "(No favorites yet)", type: "action" as const, actionId: "noop" }],
+      },
+      queue: {
+        id: "queue",
+        title: "Play Queue",
+        items: queuedSongs.length
+          ? queuedSongs.map((song) => ({ label: song.name, type: "song" as const, song }))
+          : [{ label: "(Queue is empty)", type: "action" as const, actionId: "noop" }],
       },
       tools: {
         id: "tools",
@@ -867,7 +913,12 @@ export default function MobileBulletproofPlayer() {
         title: "Local Dashboard",
         items: [
           { label: "All Songs", type: "menu", targetId: "local_songs" },
+          { label: `Favorites (${favoriteSongNames.length})`, type: "menu", targetId: "favorites" },
+          { label: `Play Queue (${queuedSongNames.length})`, type: "menu", targetId: "queue" },
           { label: "[ Import New Songs ]", type: "action", actionId: "scan_local" },
+          ...(queuedSongNames.length > 0
+            ? [{ label: "[ Clear Play Queue ]", type: "action" as const, actionId: "clear_queue" }]
+            : []),
           { label: `[ Sort: ${sortMode.toUpperCase()} ]`, type: "action", actionId: "cycle_sort" },
           { label: "[ Manage & Remove ]", type: "menu", targetId: "local_edit" }
         ]
@@ -894,65 +945,6 @@ export default function MobileBulletproofPlayer() {
             }))
           : [{ label: "(Library is empty)", type: "action", actionId: "noop" }]
       },
-      youtube: {
-        id: "youtube",
-        title: "YouTube",
-        items: [
-          { label: "Search YouTube", type: "action", actionId: "youtube_search" },
-          youtubeAccountConnected
-            ? { label: "Your Playlists", type: "menu", targetId: "youtube_playlists" }
-            : { label: "Sign In & Sync Playlists", type: "action", actionId: "youtube_sign_in" },
-          ...(youtubeAccountConnected
-            ? [{ label: "[ Sign Out ]", type: "action" as const, actionId: "youtube_sign_out" }]
-            : []),
-        ],
-      },
-      youtube_search_results: {
-        id: "youtube_search_results",
-        title: "Search Results",
-        items: youtubeSearchResults.length
-          ? youtubeSearchResults.map((track) => ({
-              label: track.title,
-              type: "youtube_track" as const,
-              youtubeTrack: track,
-            }))
-          : [{ label: "(No results)", type: "action" as const, actionId: "noop" }],
-      },
-      youtube_playlists: {
-        id: "youtube_playlists",
-        title: "Your Playlists",
-        items: youtubePlaylistsLoading
-          ? [{ label: "Loading...", type: "action" as const, actionId: "noop" }]
-          : youtubePlaylists.length
-          ? youtubePlaylists.map((playlist) => ({
-              label: playlist.snippet?.title || "Untitled Playlist",
-              type: "action" as const,
-              actionId: `open_youtube_playlist:${playlist.id}`,
-            }))
-          : [{ label: "No playlists found", type: "action" as const, actionId: "noop" }],
-      },
-      ...Object.fromEntries(
-        Object.entries(youtubePlaylistTracks).map(([playlistId, tracks]) => [
-          `youtube_playlist_${playlistId}`,
-          {
-            id: `youtube_playlist_${playlistId}`,
-            title:
-              youtubePlaylists.find((p) => p.id === playlistId)?.snippet?.title ||
-              "Playlist",
-            items:
-              youtubePlaylistTracksLoading === playlistId
-                ? [{ label: "Loading...", type: "action" as const, actionId: "noop" }]
-                : tracks.length
-                ? tracks.map((track) => ({
-                    label: track.title,
-                    type: "youtube_track" as const,
-                    youtubeTrack: track,
-                  }))
-                : [{ label: "Playlist is empty", type: "action" as const, actionId: "noop" }],
-          },
-        ])
-      ),
-
       settings: {
         id: "settings",
         title: "Settings",
@@ -1003,60 +995,40 @@ export default function MobileBulletproofPlayer() {
           { label: "OLED Magenta", type: "action", actionId: "theme_oled-magenta" },
           { label: "Cyberpunk", type: "action", actionId: "theme_cyberpunk" },
           { label: "Vaporwave", type: "action", actionId: "theme_vaporwave" },
-          { label: "Midnight", type: "action", actionId: "theme_midnight" }
+          { label: "Midnight", type: "action", actionId: "theme_midnight" },
+          { label: "Arctic", type: "action", actionId: "theme_arctic" },
+          { label: "Copper", type: "action", actionId: "theme_copper" },
+          { label: "Forest", type: "action", actionId: "theme_forest" },
+          { label: "Graphite", type: "action", actionId: "theme_graphite" },
+          { label: "Champagne", type: "action", actionId: "theme_champagne" },
+          { label: "Burgundy", type: "action", actionId: "theme_burgundy" },
+          { label: "Rose Gold", type: "action", actionId: "theme_rose-gold" },
+          { label: "Sage", type: "action", actionId: "theme_sage" },
+          { label: "Alpine", type: "action", actionId: "theme_alpine" },
+          { label: "Ocean Depths", type: "action", actionId: "theme_ocean-depths" },
+          { label: "Aurora", type: "action", actionId: "theme_aurora" },
+          { label: "Cobalt", type: "action", actionId: "theme_cobalt" },
+          { label: "Amethyst", type: "action", actionId: "theme_amethyst" },
+          { label: "Ember", type: "action", actionId: "theme_ember" },
+          { label: "Jade", type: "action", actionId: "theme_jade" },
+          { label: "Inverted", type: "action", actionId: "theme_inverted" },
+          { label: "Solarized", type: "action", actionId: "theme_solarized" }
         ]
       }
     };
   }, [
     currentSong,
-    playbackSource,
     sortedLocalSongs,
+    localSongs,
+    favoriteSongNames,
+    queuedSongNames,
     sortMode,
     hapticsOn,
     shuffleOn,
     repeatMode,
     clock24h,
     sleepTimerEndAt,
-    youtubeAccountConnected,
-    youtubePlaylists,
-    youtubePlaylistsLoading,
-    youtubeSearchResults,
-    youtubePlaylistTracks,
-    youtubePlaylistTracksLoading,
-    youtubeCurrentTrack,
   ]);
-
-  useEffect(() => {
-    const activeId = menuStack[menuStack.length - 1];
-
-    if (!youtubeAccountConnected) return;
-
-    if (
-      activeId === "youtube_playlists" &&
-      !youtubePlaylistsLoading &&
-      youtubePlaylists.length === 0
-    ) {
-      setYouTubePlaylistsLoading(true);
-
-      fetch("/api/youtube/account/playlists", {
-        credentials: "include",
-      })
-        .then(async (response) => {
-          if (!response.ok) {
-            throw new Error("Unable to load playlists");
-          }
-          return response.json();
-        })
-        .then((data) => {
-          setYouTubePlaylists(data.playlists || []);
-        })
-        .catch(() => {
-          setYouTubeAccountConnected(false);
-          showYouTubeError("Couldn't load your YouTube playlists.");
-        })
-        .finally(() => setYouTubePlaylistsLoading(false));
-    }
-  }, [menuStack, youtubeAccountConnected, youtubePlaylistsLoading, youtubePlaylists.length]);
 
   const currentMenuId = menuStack[menuStack.length - 1];
   const currentMenu = menus[currentMenuId] || menus.root;
@@ -1177,9 +1149,8 @@ export default function MobileBulletproofPlayer() {
   const handleCenterClick = () => {
     if (screen === "nowPlaying") {
       triggerHaptic("confirm", hapticsOn);
-      ensureAudioGraph();
       wakeUpAudioCtx();
-      if (currentSong || youtubeCurrentTrack) {
+      if (currentSong) {
         setIsPlaying(!isPlaying);
       }
       return;
@@ -1198,28 +1169,11 @@ export default function MobileBulletproofPlayer() {
       setMenuStack([...menuStack, selectedItem.targetId]);
       setSelectedIndex(0); 
     } else if (selectedItem?.type === "song" && selectedItem.song) {
-      if (currentSong?.file === selectedItem.song.file && playbackSource === "local") {
+      if (currentSong?.file === selectedItem.song.file) {
         setScreen("nowPlaying");
       } else {
         const songIdx = localSongs.findIndex(s => s.file === selectedItem.song?.file);
         playSong(selectedItem.song, songIdx >= 0 ? songIdx : 0);
-      }
-    } else if (selectedItem?.type === "youtube_track" && selectedItem.youtubeTrack) {
-      const list = currentMenu.items
-        .filter((it) => it.type === "youtube_track" && it.youtubeTrack)
-        .map((it) => it.youtubeTrack!) as YouTubeTrack[];
-
-      const idx = list.findIndex(
-        (track) => track.id === selectedItem.youtubeTrack!.id
-      );
-
-      if (
-        playbackSource === "youtube" &&
-        youtubeQueue[youtubeQueueIndex]?.id === selectedItem.youtubeTrack.id
-      ) {
-        setScreen("nowPlaying");
-      } else {
-        playYouTubeList(list, idx >= 0 ? idx : 0);
       }
     } else if (selectedItem?.type === "action") {
       switch(selectedItem.actionId) {
@@ -1271,6 +1225,10 @@ export default function MobileBulletproofPlayer() {
             clearLocalLibrary();
           }
           break;
+        case "clear_queue":
+          queuedSongNamesRef.current = [];
+          setQueuedSongNames([]);
+          break;
         case "show_onboard":
           setShowOnboarding(true);
           break;
@@ -1292,24 +1250,23 @@ export default function MobileBulletproofPlayer() {
         case "theme_cyberpunk": setLcdTheme("cyberpunk"); break;
         case "theme_vaporwave": setLcdTheme("vaporwave"); break;
         case "theme_midnight": setLcdTheme("midnight"); break;
-        case "youtube_search":
-          setYouTubeError("");
-          setYouTubeSearchInput("");
-          setShowYouTubeModal(true);
-          break;
-        case "youtube_sign_in":
-          window.location.href = "/api/youtube/auth/start";
-          break;
-        case "youtube_sign_out":
-          fetch("/api/youtube/auth/logout", {
-            method: "POST",
-            credentials: "include",
-          }).finally(() => {
-            setYouTubeAccountConnected(false);
-            setYouTubePlaylists([]);
-            setYouTubePlaylistTracks({});
-          });
-          break;
+        case "theme_arctic": setLcdTheme("arctic"); break;
+        case "theme_copper": setLcdTheme("copper"); break;
+        case "theme_forest": setLcdTheme("forest"); break;
+        case "theme_graphite": setLcdTheme("graphite"); break;
+        case "theme_champagne": setLcdTheme("champagne"); break;
+        case "theme_burgundy": setLcdTheme("burgundy"); break;
+        case "theme_rose-gold": setLcdTheme("rose-gold"); break;
+        case "theme_sage": setLcdTheme("sage"); break;
+        case "theme_alpine": setLcdTheme("alpine"); break;
+        case "theme_ocean-depths": setLcdTheme("ocean-depths"); break;
+        case "theme_aurora": setLcdTheme("aurora"); break;
+        case "theme_cobalt": setLcdTheme("cobalt"); break;
+        case "theme_amethyst": setLcdTheme("amethyst"); break;
+        case "theme_ember": setLcdTheme("ember"); break;
+        case "theme_jade": setLcdTheme("jade"); break;
+        case "theme_inverted": setLcdTheme("inverted"); break;
+        case "theme_solarized": setLcdTheme("solarized"); break;
         case "noop":
           break;
         default:
@@ -1319,51 +1276,15 @@ export default function MobileBulletproofPlayer() {
               removeSpecificSong(fileName);
             }
           }
-          else if (
-            selectedItem.actionId?.startsWith("open_youtube_playlist:")
-          ) {
-            const playlistId = selectedItem.actionId.replace(
-              "open_youtube_playlist:",
-              ""
-            );
-
-            triggerHaptic("select", hapticsOn);
-            setMenuStack([
-              ...menuStack,
-              `youtube_playlist_${playlistId}`,
-            ]);
-            setSelectedIndex(0);
-
-            if (!youtubePlaylistTracks[playlistId]) {
-              setYouTubePlaylistTracksLoading(playlistId);
-
-              getYouTubePlaylist(playlistId)
-                .then((playlist) => {
-                  setYouTubePlaylistTracks((prev) => ({
-                    ...prev,
-                    [playlistId]: playlist.items as YouTubeTrack[],
-                  }));
-                })
-                .catch(() => {
-                  showYouTubeError(
-                    "Couldn't load that YouTube playlist."
-                  );
-                })
-                .finally(() =>
-                  setYouTubePlaylistTracksLoading(null)
-                );
-            }
-          }
       }
     }
   };
 
   const handleGlobalPlayPause = (e: React.MouseEvent | React.TouchEvent) => {
     e.stopPropagation();
-    ensureAudioGraph();
     wakeUpAudioCtx();
 
-    if (currentSong || youtubeCurrentTrack) {
+    if (currentSong) {
       setIsPlaying(!isPlaying);
     }
   };
@@ -1406,6 +1327,23 @@ export default function MobileBulletproofPlayer() {
       case "vaporwave": return { bg: "from-[#ff71ce] to-[#01cdfe]", text: "text-[#05ffa1]", border: "border-[#b967ff]", selectedBg: "bg-[#b967ff]", selectedText: "text-[#fffb96]" };
       case "sepia": return { bg: "from-[#e4d0b8] to-[#c7a982]", text: "text-[#5e4022]", border: "border-[#5e4022]", selectedBg: "bg-[#5e4022]", selectedText: "text-[#e4d0b8]" };
       case "midnight": return { bg: "from-[#0f172a] to-[#020617]", text: "text-[#38bdf8]", border: "border-[#38bdf8]", selectedBg: "bg-[#38bdf8]", selectedText: "text-[#020617]" };
+      case "arctic": return { bg: "from-[#e0f7fa] to-[#80deea]", text: "text-[#064663]", border: "border-[#064663]", selectedBg: "bg-[#064663]", selectedText: "text-[#e0f7fa]" };
+      case "copper": return { bg: "from-[#f4d3b2] to-[#b87333]", text: "text-[#3d2111]", border: "border-[#3d2111]", selectedBg: "bg-[#3d2111]", selectedText: "text-[#f4d3b2]" };
+      case "forest": return { bg: "from-[#b7d7a8] to-[#52734d]", text: "text-[#152b1c]", border: "border-[#152b1c]", selectedBg: "bg-[#152b1c]", selectedText: "text-[#b7d7a8]" };
+      case "graphite": return { bg: "from-[#43464b] to-[#17191d]", text: "text-[#f0f1f2]", border: "border-[#aeb4bd]", selectedBg: "bg-[#d7dbe0]", selectedText: "text-[#202328]" };
+      case "champagne": return { bg: "from-[#fff2d8] to-[#d5b98c]", text: "text-[#4a3824]", border: "border-[#806443]", selectedBg: "bg-[#806443]", selectedText: "text-[#fff2d8]" };
+      case "burgundy": return { bg: "from-[#641e35] to-[#260d1a]", text: "text-[#ffe8e7]", border: "border-[#e7a6a6]", selectedBg: "bg-[#e7a6a6]", selectedText: "text-[#34101d]" };
+      case "rose-gold": return { bg: "from-[#f5d5ca] to-[#bd8177]", text: "text-[#482b2b]", border: "border-[#704347]", selectedBg: "bg-[#704347]", selectedText: "text-[#fce8df]" };
+      case "sage": return { bg: "from-[#e3eadb] to-[#a8b89d]", text: "text-[#344235]", border: "border-[#526452]", selectedBg: "bg-[#526452]", selectedText: "text-[#eef2e8]" };
+      case "alpine": return { bg: "from-[#f3f6f2] to-[#a8c0bd]", text: "text-[#263c42]", border: "border-[#45656b]", selectedBg: "bg-[#45656b]", selectedText: "text-[#f3f6f2]" };
+      case "ocean-depths": return { bg: "from-[#164e63] to-[#082f49]", text: "text-[#d7f3f4]", border: "border-[#67c8c4]", selectedBg: "bg-[#67c8c4]", selectedText: "text-[#073747]" };
+      case "aurora": return { bg: "from-[#153a45] to-[#30254f]", text: "text-[#d5fff1]", border: "border-[#8ee8c2]", selectedBg: "bg-[#8ee8c2]", selectedText: "text-[#17353e]" };
+      case "cobalt": return { bg: "from-[#244b9b] to-[#122454]", text: "text-[#e8efff]", border: "border-[#91b5ff]", selectedBg: "bg-[#91b5ff]", selectedText: "text-[#13244b]" };
+      case "amethyst": return { bg: "from-[#49346f] to-[#211b3d]", text: "text-[#f0e8ff]", border: "border-[#c5a8f5]", selectedBg: "bg-[#c5a8f5]", selectedText: "text-[#2d2148]" };
+      case "ember": return { bg: "from-[#5c3027] to-[#241918]", text: "text-[#ffe7d4]", border: "border-[#f2a66d]", selectedBg: "bg-[#f2a66d]", selectedText: "text-[#3c211b]" };
+      case "jade": return { bg: "from-[#d7eee3] to-[#75b6a0]", text: "text-[#153c35]", border: "border-[#286557]", selectedBg: "bg-[#286557]", selectedText: "text-[#e0f5ea]" };
+      case "inverted": return { bg: "from-[#f5f5f5] to-[#d6d6d6]", text: "text-[#121212]", border: "border-[#121212]", selectedBg: "bg-[#121212]", selectedText: "text-[#f5f5f5]" };
+      case "solarized": return { bg: "from-[#fdf6e3] to-[#eee8d5]", text: "text-[#586e75]", border: "border-[#657b83]", selectedBg: "bg-[#268bd2]", selectedText: "text-[#fdf6e3]" };
       case "oled-red": return { bg: "bg-black", text: "text-red-600", border: "border-red-900", selectedBg: "bg-red-900", selectedText: "text-black" };
       case "oled-amber": return { bg: "bg-black", text: "text-amber-500", border: "border-amber-700", selectedBg: "bg-amber-700", selectedText: "text-black" };
       case "oled-green": return { bg: "bg-black", text: "text-green-500", border: "border-green-800", selectedBg: "bg-green-800", selectedText: "text-black" };
@@ -1424,46 +1362,33 @@ export default function MobileBulletproofPlayer() {
   };
   const theme = getLcdStyle();
 
-  const isYouTubeSource = playbackSource === "youtube";
   const unifiedIsPlaying = isPlaying;
-  const unifiedTrackName = isYouTubeSource
-    ? youtubeCurrentTrack?.title ?? "No Track Selected"
-    : currentSong
-    ? currentSong.name
-    : "No Track Selected";
+  const unifiedTrackName = currentSong?.name ?? "No Track Selected";
   const unifiedCurrentTime = currentTime;
   const unifiedDuration = duration;
-  const unifiedProgress =
-    unifiedDuration > 0
-      ? (unifiedCurrentTime / unifiedDuration) * 100
-      : 0;
+  const unifiedProgress = unifiedDuration > 0
+    ? (unifiedCurrentTime / unifiedDuration) * 100
+    : 0;
 
-  const coverflowItems: CoverflowItem[] = isYouTubeSource
-    ? youtubeQueue.map((track) => ({
-        id: track.id,
-        name: track.title,
-        artworkUrl: track.thumbnail,
-      }))
-    : localSongs.map((s) => ({
-        id: s.name,
-        name: s.name,
-        artworkUrl: s.artworkUrl,
-      }));
+  const coverflowItems: CoverflowItem[] = localSongs.map((song) => ({
+    id: song.name,
+    name: song.name,
+    artworkUrl: song.artworkUrl,
+  }));
 
-  const coverflowActiveIndex = isYouTubeSource
-    ? youtubeQueueIndex
-    : currentIndex;
+  const coverflowActiveIndex = currentIndex;
+  const memoryUsageBytes = typeof performance !== "undefined"
+    ? (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize
+    : undefined;
 
   return (
-    <div className="fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 pt-12 pb-4">
-      
-      {/* --- Secret Developer Diagnostics HUD --- */}
+<div className="fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 pt-0 pb-0">      {/* --- Secret Developer Diagnostics HUD --- */}
       {showDiag && (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-black/90 border border-green-500 text-green-400 text-[10px] p-3 rounded-lg z-[100] font-mono shadow-[0_0_20px_rgba(0,255,0,0.2)] w-3/4 max-w-xs">
           <p className="font-bold border-b border-green-500/50 pb-1 mb-2 text-center uppercase tracking-widest">Diagnostics</p>
-          <p>RAM Usage: {typeof performance !== "undefined" && (performance as any).memory ? `${Math.round((performance as any).memory.usedJSHeapSize / 1048576)} MB` : 'N/A'}</p>
+          <p>RAM Usage: {memoryUsageBytes === undefined ? "N/A" : `${Math.round(memoryUsageBytes / 1048576)} MB`}</p>
           <p>Audio Context: {audioCtxRef.current?.state || 'UNINITIALIZED'}</p>
-          <p>Engine Source: {playbackSource.toUpperCase()}</p>
+          <p>Engine Source: Local Library</p>
           <button onClick={() => setShowDiag(false)} className="mt-3 w-full py-2 bg-green-500/20 hover:bg-green-500/40 rounded transition-colors text-white font-bold tracking-widest">CLOSE</button>
         </div>
       )}
@@ -1483,13 +1408,14 @@ export default function MobileBulletproofPlayer() {
                   <li>• <b>Center Button:</b> Click to select items or toggle Play/Pause.</li>
                   <li>• <b>Menu Button:</b> Click to go back to the previous screen.</li>
                   <li>• <b>Direct Touch:</b> You can tap menu items directly on the screen!</li>
+                  <li>• <b>Library:</b> Use the heart to save favorites and the list-plus button to queue a song. Queued songs play next.</li>
                 </ul>
               </section>
 
               <section>
                 <h3 className="text-green-400 font-bold mb-2 uppercase tracking-wider text-xs flex items-center gap-2"><span className="text-base">🎵</span> Playback & Speed</h3>
                 <ul className="space-y-2 text-xs leading-relaxed">
-                  <li>• <b>Inner Ring:</b> On the 'Now Playing' screen, drag in circles to smoothly stretch track tempo (0.5x to 2.0x).</li>
+                  <li>• <b>Inner Ring:</b> On the &apos;Now Playing&apos; screen, drag in circles to smoothly stretch track tempo (0.5x to 2.0x).</li>
                   <li>• <b>Double-Tap Inner:</b> Instantly reset playback speed to normal (1.0x).</li>
                 </ul>
               </section>
@@ -1499,7 +1425,7 @@ export default function MobileBulletproofPlayer() {
                 <ul className="space-y-2 text-xs leading-relaxed">
                   <li>• <b>Access:</b> Go to Main Menu &gt; Playback Tools &gt; 5-Band Equalizer.</li>
                   <li>• <b>Select Band:</b> Scroll the trackpad to highlight a frequency band.</li>
-                  <li>• <b>Adjust Gain:</b> Click the Center Button to "unlock" the band, then scroll the trackpad to adjust the gain (+12dB to -12dB). Click Center again to lock it in.</li>
+                  <li>• <b>Adjust Gain:</b> Click the Center Button to &quot;unlock&quot; the band, then scroll the trackpad to adjust the gain (+12dB to -12dB). Click Center again to lock it in.</li>
                   <li>• <b>Direct Touch:</b> Tap a band on-screen to select/unlock it. Tap it <i>again</i> to instantly reset its gain to 0.</li>
                 </ul>
               </section>
@@ -1523,103 +1449,6 @@ export default function MobileBulletproofPlayer() {
               >
                 Start Listening
               </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {showYouTubeModal && (
-        <div className="absolute inset-0 z-[60] bg-black/80 backdrop-blur-sm flex items-center justify-center p-6">
-          <div
-            className={`bg-gradient-to-b ${theme.bg} ${theme.text} p-6 rounded-2xl max-w-lg w-full shadow-2xl border-2 ${theme.border} max-h-[80vh] flex flex-col`}
-          >
-            <div className="flex items-center justify-between gap-4 mb-4">
-              <h2 className="text-sm font-bold uppercase tracking-widest">
-                YouTube Guest
-              </h2>
-
-              <button
-                onClick={() => setShowYouTubeModal(false)}
-                className="text-xs font-bold opacity-70 hover:opacity-100"
-              >
-                CLOSE
-              </button>
-            </div>
-
-            <p className="text-[11px] font-semibold mb-4 leading-relaxed opacity-80">
-              Search YouTube and play audio directly through RetroPod.
-              No YouTube account is required for Guest mode.
-            </p>
-
-            <div className="flex gap-2 mb-4">
-              <input
-                type="text"
-                value={youtubeSearchInput}
-                onChange={(e) => setYouTubeSearchInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    handleYouTubeSearch(youtubeSearchInput);
-                  }
-                }}
-                placeholder="Search YouTube..."
-                className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-black/10 border border-current/30 text-current placeholder:text-current/50 text-xs font-bold outline-none"
-                autoFocus
-              />
-
-              <button
-                onClick={() => handleYouTubeSearch(youtubeSearchInput)}
-                disabled={youtubeSearchLoading}
-                className="px-4 py-2 bg-black text-white font-bold rounded-lg text-xs uppercase tracking-widest disabled:opacity-50"
-              >
-                {youtubeSearchLoading ? "..." : "Search"}
-              </button>
-            </div>
-
-            {youtubeError && (
-              <div className="mb-3 rounded-lg border border-red-500/40 bg-red-950/30 px-3 py-2 text-[11px] font-bold text-red-300">
-                {youtubeError}
-              </div>
-            )}
-
-            <div className="overflow-y-auto flex-1 min-h-0 space-y-1">
-              {youtubeSearchResults.map((track) => (
-                <button
-                  key={track.id}
-                  onClick={() => {
-                    setShowYouTubeModal(false);
-                    playYouTubeTrack(track);
-                  }}
-                  className="w-full flex items-center gap-3 p-2 rounded-lg text-left hover:bg-black/10 transition-colors"
-                >
-                  {track.thumbnail ? (
-                    <img
-                      src={track.thumbnail}
-                      alt=""
-                      className="w-12 h-12 rounded object-cover shrink-0"
-                    />
-                  ) : (
-                    <div className="w-12 h-12 rounded bg-black/20 shrink-0" />
-                  )}
-
-                  <div className="min-w-0 flex-1">
-                    <div className="text-xs font-bold truncate">
-                      {track.title}
-                    </div>
-                    <div className="text-[10px] font-semibold opacity-60 truncate">
-                      {track.artist}
-                    </div>
-                  </div>
-
-                  <Play size={13} className="shrink-0" />
-                </button>
-              ))}
-
-              {!youtubeSearchLoading &&
-                youtubeSearchResults.length === 0 && (
-                  <div className="py-8 text-center text-[11px] font-bold opacity-50">
-                    Search for a song to get started.
-                  </div>
-                )}
             </div>
           </div>
         </div>
@@ -1677,8 +1506,57 @@ export default function MobileBulletproofPlayer() {
                         selectedIndex === index ? `${theme.selectedBg} ${theme.selectedText}` : ""
                       }`}
                     >
-                      <span className="truncate">{item.label}</span>
-                      {item.type === "menu" && <span>&gt;</span>}
+                      <span className="truncate min-w-0">{item.label}</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {item.type === "song" && item.song && (
+                          <>
+                            <button
+                              type="button"
+                              aria-label={favoriteSongNames.includes(item.song.file.name) ? `Remove ${item.song.name} from favorites` : `Add ${item.song.name} to favorites`}
+                              title={favoriteSongNames.includes(item.song.file.name) ? "Remove favorite" : "Add to favorites"}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                toggleFavorite(item.song!);
+                              }}
+                              className="p-1 rounded hover:bg-black/20"
+                            >
+                              <Heart
+                                size={14}
+                                className={favoriteSongNames.includes(item.song.file.name) ? "fill-current" : ""}
+                              />
+                            </button>
+                            {currentMenuId === "queue" ? (
+                              <button
+                                type="button"
+                                aria-label={`Remove ${item.song.name} from queue`}
+                                title="Remove from queue"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  removeQueuedSong(item.song!.file.name);
+                                }}
+                                className="p-1 rounded hover:bg-black/20"
+                              >
+                                <X size={14} />
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                aria-label={`Add ${item.song.name} to queue`}
+                                title={queuedSongNames.includes(item.song.file.name) ? "Already queued" : "Add to queue"}
+                                disabled={queuedSongNames.includes(item.song.file.name)}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  enqueueSong(item.song!);
+                                }}
+                                className="p-1 rounded hover:bg-black/20 disabled:opacity-40"
+                              >
+                                <ListPlus size={14} />
+                              </button>
+                            )}
+                          </>
+                        )}
+                        {item.type === "menu" && <span>&gt;</span>}
+                      </div>
                     </li>
                   ))}
                 </ul>
@@ -1766,7 +1644,26 @@ export default function MobileBulletproofPlayer() {
     aria-valuemin={0}
     aria-valuemax={unifiedDuration}
     aria-valuenow={unifiedCurrentTime}
+    aria-valuetext={`${formatTime(unifiedCurrentTime)} of ${formatTime(unifiedDuration)}`}
     tabIndex={0}
+    onKeyDown={(event) => {
+      if (!audioRef.current || unifiedDuration <= 0) return;
+      const seekStep = event.shiftKey ? 30 : 5;
+      const targetTime = event.key === "ArrowRight"
+        ? Math.min(unifiedDuration, audioRef.current.currentTime + seekStep)
+        : event.key === "ArrowLeft"
+        ? Math.max(0, audioRef.current.currentTime - seekStep)
+        : event.key === "Home"
+        ? 0
+        : event.key === "End"
+        ? unifiedDuration
+        : null;
+      if (targetTime === null) return;
+      event.preventDefault();
+      event.stopPropagation();
+      audioRef.current.currentTime = targetTime;
+      setCurrentTime(targetTime);
+    }}
     onPointerDown={(e) => {
       e.stopPropagation();
 
@@ -1782,7 +1679,6 @@ export default function MobileBulletproofPlayer() {
 
       audioRef.current.currentTime = nextTime;
       setCurrentTime(nextTime);
-      setProgress(ratio * 100);
 
       e.currentTarget.setPointerCapture(e.pointerId);
     }}
@@ -1802,7 +1698,6 @@ export default function MobileBulletproofPlayer() {
 
       audioRef.current.currentTime = nextTime;
       setCurrentTime(nextTime);
-      setProgress(ratio * 100);
     }}
     onPointerUp={(e) => {
       e.stopPropagation();
@@ -1846,14 +1741,8 @@ export default function MobileBulletproofPlayer() {
 
                 <div className="mt-3 flex gap-6 text-[9px] font-bold tracking-widest uppercase">
                   <div className={`flex items-center gap-1.5 px-2 py-0.5 border-[1.5px] ${theme.border} rounded-sm`}>
-                    {isYouTubeSource ? (
-                      <span>YouTube</span>
-                    ) : (
-                      <>
-                        <RefreshCw size={10} strokeWidth={3} />
-                        <span>{playbackSpeed}x</span>
-                      </>
-                    )}
+                    <RefreshCw size={10} strokeWidth={3} />
+                    <span>{playbackSpeed}x</span>
                   </div>
                 </div>
               </div>
