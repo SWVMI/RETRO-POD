@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal, Heart, ListPlus, X } from "lucide-react";
+import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal, Heart, ListPlus, X, Shuffle, Repeat, Repeat1 } from "lucide-react";
 import { triggerHaptic } from "@/lib/haptics";
 import AlbumCoverflow, { CoverflowItem } from "@/components/AlbumCoverflow";
 
@@ -15,14 +15,15 @@ const formatTime = (seconds: number) => {
 
 type SongItem = { file: File; name: string; artworkUrl?: string };
 const lcdThemes = [
-  "sepia", "blue", "green", "amber", "gray", "pink", "purple", "teal", "white",
-  "red", "oled-red", "oled-amber", "oled-green", "oled-cyan", "oled-magenta",
-  "cyberpunk", "vaporwave", "midnight", "arctic", "copper", "forest",
-  "graphite", "champagne", "burgundy", "rose-gold", "sage", "alpine",
+  "burgundy", "graphite", "champagne", "rose-gold", "sage", "alpine",
   "ocean-depths", "aurora", "cobalt", "amethyst", "ember", "jade",
-  "inverted", "solarized",
+  "inverted", "solarized", "cyberpunk", "vaporwave", "midnight", "arctic",
+  "copper", "forest", "sepia", "blue", "green", "amber", "gray", "pink",
+  "purple", "teal", "white", "red", "oled-red", "oled-amber", "oled-green",
+  "oled-cyan", "oled-magenta",
 ] as const;
 type LcdTheme = (typeof lcdThemes)[number];
+type UserPlaylist = { id: string; name: string; songNames: string[] };
 type DirectoryHandleWithIteration = FileSystemDirectoryHandle & {
   entries: () => AsyncIterableIterator<[string, FileSystemFileHandle | FileSystemDirectoryHandle]>;
   keys: () => AsyncIterableIterator<string>;
@@ -38,6 +39,7 @@ type MenuItem = {
   targetId?: string;
   actionId?: string;
   song?: SongItem;
+  playlistId?: string;
 };
 type Menu = { id: string; title: string; items: MenuItem[] };
 
@@ -48,7 +50,7 @@ export default function MobileBulletproofPlayer() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   
   // Settings
-  const [lcdTheme, setLcdTheme] = useState<LcdTheme>("sepia");
+  const [lcdTheme, setLcdTheme] = useState<LcdTheme>("burgundy");
   const [hapticsOn, setHapticsOn] = useState(true);
   const [shuffleOn, setShuffleOn] = useState(false);
   const [repeatMode, setRepeatMode] = useState<"off" | "one" | "all">("all");
@@ -76,6 +78,7 @@ export default function MobileBulletproofPlayer() {
   const [currentSong, setCurrentSong] = useState<SongItem | null>(null);
   const [favoriteSongNames, setFavoriteSongNames] = useState<string[]>([]);
   const [queuedSongNames, setQueuedSongNames] = useState<string[]>([]);
+  const [playlists, setPlaylists] = useState<UserPlaylist[]>([]);
   const [libraryPreferencesLoaded, setLibraryPreferencesLoaded] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -85,6 +88,14 @@ export default function MobileBulletproofPlayer() {
   const [menuStack, setMenuStack] = useState<string[]>(["root"]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [screen, setScreen] = useState<"menu" | "nowPlaying" | "eq">("menu");
+  const previousSelectedIndexRef = useRef(selectedIndex);
+
+  useEffect(() => {
+    if (previousSelectedIndexRef.current !== selectedIndex) {
+      triggerHaptic("tick", hapticsOn);
+      previousSelectedIndexRef.current = selectedIndex;
+    }
+  }, [selectedIndex, hapticsOn]);
 
   const padRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -99,6 +110,7 @@ export default function MobileBulletproofPlayer() {
   const sleepTimerEndAtRef = useRef<number | null>(null);
   const repeatModeRef = useRef<"off" | "one" | "all">("all");
   const shuffleOnRef = useRef(false);
+  const shufflePlayedSongNamesRef = useRef<Set<string>>(new Set());
   const localSongsRef = useRef<SongItem[]>([]);
   const queuedSongNamesRef = useRef<string[]>([]);
   const currentIndexRef = useRef(0);
@@ -361,6 +373,10 @@ export default function MobileBulletproofPlayer() {
       setLocalSongs(loadedSongs);
       const availableFileNames = new Set(loadedSongs.map((song) => song.file.name));
       setFavoriteSongNames((previous) => previous.filter((name) => availableFileNames.has(name)));
+      setPlaylists((previous) => previous.map((playlist) => ({
+        ...playlist,
+        songNames: playlist.songNames.filter((name) => availableFileNames.has(name)),
+      })));
       const validQueue = queuedSongNamesRef.current.filter((name) => availableFileNames.has(name));
       queuedSongNamesRef.current = validQueue;
       setQueuedSongNames(validQueue);
@@ -414,6 +430,7 @@ export default function MobileBulletproofPlayer() {
     releaseAudioSource();
     setLocalSongs([]);
     setFavoriteSongNames([]);
+    setPlaylists([]);
     queuedSongNamesRef.current = [];
     setQueuedSongNames([]);
     setIsPlaying(false);
@@ -431,6 +448,10 @@ export default function MobileBulletproofPlayer() {
     }
     setLocalSongs(prev => prev.filter(s => s.file.name !== fileName));
     setFavoriteSongNames((previous) => previous.filter((name) => name !== fileName));
+    setPlaylists((previous) => previous.map((playlist) => ({
+      ...playlist,
+      songNames: playlist.songNames.filter((name) => name !== fileName),
+    })));
     setQueuedSongNames((previous) => {
       const next = previous.filter((name) => name !== fileName);
       queuedSongNamesRef.current = next;
@@ -460,6 +481,9 @@ export default function MobileBulletproofPlayer() {
     setCurrentIndex(index);
     setScreen("nowPlaying");
     const requestId = ++playbackRequestRef.current;
+    if (shuffleOnRef.current) {
+      shufflePlayedSongNamesRef.current.add(song.file.name);
+    }
     if (queuedSongNamesRef.current.includes(song.file.name)) {
       const nextQueue = queuedSongNamesRef.current.filter((name) => name !== song.file.name);
       queuedSongNamesRef.current = nextQueue;
@@ -511,6 +535,53 @@ export default function MobileBulletproofPlayer() {
     triggerHaptic("select", hapticsOn);
   };
 
+  const addSongToPlaylist = (playlistId: string, song: SongItem) => {
+    setPlaylists((previous) => previous.map((playlist) => (
+      playlist.id === playlistId && !playlist.songNames.includes(song.file.name)
+        ? { ...playlist, songNames: [...playlist.songNames, song.file.name] }
+        : playlist
+    )));
+    triggerHaptic("select", hapticsOn);
+  };
+
+  const removeSongFromPlaylist = (playlistId: string, fileName: string) => {
+    setPlaylists((previous) => previous.map((playlist) => (
+      playlist.id === playlistId
+        ? { ...playlist, songNames: playlist.songNames.filter((name) => name !== fileName) }
+        : playlist
+    )));
+    triggerHaptic("select", hapticsOn);
+  };
+
+  const createPlaylist = () => {
+    const name = window.prompt("Name your playlist")?.trim();
+    if (!name) return;
+    const id = `playlist-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setPlaylists((previous) => [...previous, { id, name, songNames: [] }]);
+    setMenuStack((previous) => [...previous, `playlist_${id}`]);
+    setSelectedIndex(0);
+    triggerHaptic("confirm", hapticsOn);
+  };
+
+  const toggleShuffle = () => {
+    setShuffleOn((previous) => {
+      const next = !previous;
+      shuffleOnRef.current = next;
+      shufflePlayedSongNamesRef.current.clear();
+      const activeSongName = currentSong?.file.name;
+      if (next && activeSongName) shufflePlayedSongNamesRef.current.add(activeSongName);
+      return next;
+    });
+  };
+
+  const cycleRepeat = () => {
+    setRepeatMode((previous) => {
+      const next = previous === "off" ? "all" : previous === "all" ? "one" : "off";
+      repeatModeRef.current = next;
+      return next;
+    });
+  };
+
   const removeQueuedSong = (fileName: string) => {
     setQueuedSongNames((previous) => {
       const next = previous.filter((name) => name !== fileName);
@@ -544,7 +615,7 @@ export default function MobileBulletproofPlayer() {
   const handleNextSong = () => {
     if (playNextQueuedSong()) return;
     if (localSongs.length === 0) return;
-    const nextIdx = shuffleOn ? pickRandomIndex(localSongs.length, currentIndex) : (currentIndex + 1) % localSongs.length;
+    const nextIdx = shuffleOnRef.current ? pickRandomIndex(localSongs.length, currentIndex) : (currentIndex + 1) % localSongs.length;
     playSong(localSongs[nextIdx], nextIdx);
   };
 
@@ -573,7 +644,30 @@ export default function MobileBulletproofPlayer() {
     if (playNextQueuedSong()) return;
 
     if (shuffleOnRef.current) {
-      const nextIdx = pickRandomIndex(localSongsRef.current.length, currentIndexRef.current);
+      const currentName = localSongsRef.current[currentIndexRef.current]?.file.name;
+      if (currentName) shufflePlayedSongNamesRef.current.add(currentName);
+      const unplayed = localSongsRef.current
+        .map((song, index) => ({ song, index }))
+        .filter(({ song }) => !shufflePlayedSongNamesRef.current.has(song.file.name));
+      if (unplayed.length === 0 && repeatModeRef.current === "off") {
+        setIsPlaying(false);
+        return;
+      }
+      if (unplayed.length === 0) {
+        shufflePlayedSongNamesRef.current.clear();
+        const currentName = localSongsRef.current[currentIndexRef.current]?.file.name;
+        if (currentName) shufflePlayedSongNamesRef.current.add(currentName);
+        unplayed.push(...localSongsRef.current
+          .map((song, index) => ({ song, index }))
+          .filter(({ song }) => song.file.name !== currentName));
+        if (unplayed.length === 0) {
+          const currentSong = localSongsRef.current[currentIndexRef.current];
+          if (currentSong) playSong(currentSong, currentIndexRef.current);
+          return;
+        }
+      }
+      const chosen = unplayed[Math.floor(Math.random() * unplayed.length)];
+      const nextIdx = chosen.index;
       playSong(localSongsRef.current[nextIdx], nextIdx);
       return;
     }
@@ -646,6 +740,7 @@ export default function MobileBulletproofPlayer() {
 
     const savedFavorites = localStorage.getItem("retro_favorites");
     const savedQueue = localStorage.getItem("retro_queue");
+    const savedPlaylists = localStorage.getItem("retro_playlists");
     try {
       if (savedFavorites) {
         const parsed = JSON.parse(savedFavorites);
@@ -658,6 +753,25 @@ export default function MobileBulletproofPlayer() {
         if (Array.isArray(parsed) && parsed.every((name) => typeof name === "string")) {
           setQueuedSongNames(parsed);
           queuedSongNamesRef.current = parsed;
+        }
+      }
+      if (savedPlaylists) {
+        const parsed: unknown = JSON.parse(savedPlaylists);
+        if (
+          Array.isArray(parsed) &&
+          parsed.every((playlist) =>
+            typeof playlist === "object" &&
+            playlist !== null &&
+            "id" in playlist &&
+            typeof playlist.id === "string" &&
+            "name" in playlist &&
+            typeof playlist.name === "string" &&
+            "songNames" in playlist &&
+            Array.isArray(playlist.songNames) &&
+            playlist.songNames.every((name: unknown) => typeof name === "string")
+          )
+        ) {
+          setPlaylists(parsed as UserPlaylist[]);
         }
       }
     } catch (error) {
@@ -801,6 +915,11 @@ export default function MobileBulletproofPlayer() {
       localStorage.setItem("retro_queue", JSON.stringify(queuedSongNames));
     }
   }, [queuedSongNames, libraryPreferencesLoaded]);
+  useEffect(() => {
+    if (libraryPreferencesLoaded) {
+      localStorage.setItem("retro_playlists", JSON.stringify(playlists));
+    }
+  }, [playlists, libraryPreferencesLoaded]);
 
   useEffect(() => {
     if (currentSong) {
@@ -875,8 +994,46 @@ export default function MobileBulletproofPlayer() {
     const queuedSongs = queuedSongNames
       .map((name) => localSongs.find((song) => song.file.name === name))
       .filter((song): song is SongItem => song !== undefined);
+    const playlistMenus: Record<string, Menu> = {};
+    playlists.forEach((playlist) => {
+      const playlistSongs = playlist.songNames
+        .map((name) => localSongs.find((song) => song.file.name === name))
+        .filter((song): song is SongItem => song !== undefined);
+      const addableSongs = sortedLocalSongs.filter((song) => !playlist.songNames.includes(song.file.name));
+      playlistMenus[`playlist_${playlist.id}`] = {
+        id: `playlist_${playlist.id}`,
+        title: playlist.name,
+        items: [
+          { label: "[ Add Songs ]", type: "menu", targetId: `playlist_add_${playlist.id}` },
+          { label: "[ Rename Playlist ]", type: "action", actionId: `rename_playlist:${playlist.id}` },
+          { label: "[ Delete Playlist ]", type: "action", actionId: `delete_playlist:${playlist.id}` },
+          ...(playlistSongs.length
+            ? playlistSongs.map((song) => ({
+                label: song.name,
+                type: "song" as const,
+                song,
+                playlistId: playlist.id,
+              }))
+            : [{ label: "(No songs yet)", type: "action" as const, actionId: "noop" }]),
+        ],
+      };
+      playlistMenus[`playlist_add_${playlist.id}`] = {
+        id: `playlist_add_${playlist.id}`,
+        title: `Add to ${playlist.name}`,
+        items: addableSongs.length
+          ? addableSongs.map((song) => ({
+              label: song.name,
+              type: "action" as const,
+              actionId: "playlist_add_song",
+              playlistId: playlist.id,
+              song,
+            }))
+          : [{ label: "(All library songs are added)", type: "action" as const, actionId: "noop" }],
+      };
+    });
 
     return {
+      ...playlistMenus,
       root: {
         id: "root",
         title: "Main Menu",
@@ -915,6 +1072,7 @@ export default function MobileBulletproofPlayer() {
           { label: "All Songs", type: "menu", targetId: "local_songs" },
           { label: `Favorites (${favoriteSongNames.length})`, type: "menu", targetId: "favorites" },
           { label: `Play Queue (${queuedSongNames.length})`, type: "menu", targetId: "queue" },
+          { label: `Playlists (${playlists.length})`, type: "menu", targetId: "playlists" },
           { label: "[ Import New Songs ]", type: "action", actionId: "scan_local" },
           ...(queuedSongNames.length > 0
             ? [{ label: "[ Clear Play Queue ]", type: "action" as const, actionId: "clear_queue" }]
@@ -922,6 +1080,20 @@ export default function MobileBulletproofPlayer() {
           { label: `[ Sort: ${sortMode.toUpperCase()} ]`, type: "action", actionId: "cycle_sort" },
           { label: "[ Manage & Remove ]", type: "menu", targetId: "local_edit" }
         ]
+      },
+      playlists: {
+        id: "playlists",
+        title: "Playlists",
+        items: [
+          { label: "[ Create Playlist ]", type: "action", actionId: "create_playlist" },
+          ...(playlists.length
+            ? playlists.map((playlist) => ({
+                label: playlist.name,
+                type: "menu" as const,
+                targetId: `playlist_${playlist.id}`,
+              }))
+            : [{ label: "(No playlists yet)", type: "action" as const, actionId: "noop" }]),
+        ],
       },
       local_songs: {
         id: "local_songs",
@@ -978,6 +1150,26 @@ export default function MobileBulletproofPlayer() {
         id: "settings_theme",
         title: "LCD Theme",
         items: [
+          { label: "Burgundy · Premium", type: "action", actionId: "theme_burgundy" },
+          { label: "Graphite · Premium", type: "action", actionId: "theme_graphite" },
+          { label: "Champagne · Premium", type: "action", actionId: "theme_champagne" },
+          { label: "Rose Gold · Premium", type: "action", actionId: "theme_rose-gold" },
+          { label: "Sage · Premium", type: "action", actionId: "theme_sage" },
+          { label: "Alpine · Premium", type: "action", actionId: "theme_alpine" },
+          { label: "Ocean Depths · Premium", type: "action", actionId: "theme_ocean-depths" },
+          { label: "Aurora · Premium", type: "action", actionId: "theme_aurora" },
+          { label: "Cobalt · Premium", type: "action", actionId: "theme_cobalt" },
+          { label: "Amethyst · Premium", type: "action", actionId: "theme_amethyst" },
+          { label: "Ember · Premium", type: "action", actionId: "theme_ember" },
+          { label: "Jade · Premium", type: "action", actionId: "theme_jade" },
+          { label: "Inverted · Premium", type: "action", actionId: "theme_inverted" },
+          { label: "Solarized · Premium", type: "action", actionId: "theme_solarized" },
+          { label: "Cyberpunk", type: "action", actionId: "theme_cyberpunk" },
+          { label: "Vaporwave", type: "action", actionId: "theme_vaporwave" },
+          { label: "Midnight", type: "action", actionId: "theme_midnight" },
+          { label: "Arctic", type: "action", actionId: "theme_arctic" },
+          { label: "Copper", type: "action", actionId: "theme_copper" },
+          { label: "Forest", type: "action", actionId: "theme_forest" },
           { label: "Sepia", type: "action", actionId: "theme_sepia" },
           { label: "Classic Blue", type: "action", actionId: "theme_blue" },
           { label: "Matrix Green", type: "action", actionId: "theme_green" },
@@ -993,31 +1185,12 @@ export default function MobileBulletproofPlayer() {
           { label: "OLED Green", type: "action", actionId: "theme_oled-green" },
           { label: "OLED Cyan", type: "action", actionId: "theme_oled-cyan" },
           { label: "OLED Magenta", type: "action", actionId: "theme_oled-magenta" },
-          { label: "Cyberpunk", type: "action", actionId: "theme_cyberpunk" },
-          { label: "Vaporwave", type: "action", actionId: "theme_vaporwave" },
-          { label: "Midnight", type: "action", actionId: "theme_midnight" },
-          { label: "Arctic", type: "action", actionId: "theme_arctic" },
-          { label: "Copper", type: "action", actionId: "theme_copper" },
-          { label: "Forest", type: "action", actionId: "theme_forest" },
-          { label: "Graphite", type: "action", actionId: "theme_graphite" },
-          { label: "Champagne", type: "action", actionId: "theme_champagne" },
-          { label: "Burgundy", type: "action", actionId: "theme_burgundy" },
-          { label: "Rose Gold", type: "action", actionId: "theme_rose-gold" },
-          { label: "Sage", type: "action", actionId: "theme_sage" },
-          { label: "Alpine", type: "action", actionId: "theme_alpine" },
-          { label: "Ocean Depths", type: "action", actionId: "theme_ocean-depths" },
-          { label: "Aurora", type: "action", actionId: "theme_aurora" },
-          { label: "Cobalt", type: "action", actionId: "theme_cobalt" },
-          { label: "Amethyst", type: "action", actionId: "theme_amethyst" },
-          { label: "Ember", type: "action", actionId: "theme_ember" },
-          { label: "Jade", type: "action", actionId: "theme_jade" },
-          { label: "Inverted", type: "action", actionId: "theme_inverted" },
-          { label: "Solarized", type: "action", actionId: "theme_solarized" }
         ]
       }
     };
   }, [
     currentSong,
+    playlists,
     sortedLocalSongs,
     localSongs,
     favoriteSongNames,
@@ -1117,7 +1290,6 @@ export default function MobileBulletproofPlayer() {
             let next = prev + (steps * direction);
             if (next < 0) next = 0;
             if (next > 4) next = 4;
-            if (next !== prev) triggerHaptic("tick", hapticsOn);
             return next;
           });
         }
@@ -1126,7 +1298,6 @@ export default function MobileBulletproofPlayer() {
           let next = prev + (steps * direction);
           if (next < 0) next = 0;
           if (next >= currentMenu.items.length) next = currentMenu.items.length - 1;
-          if (next !== prev) triggerHaptic("tick", hapticsOn);
           return next;
         });
       } else if (activeRingRef.current === "inner" && screen === "nowPlaying") {
@@ -1146,37 +1317,53 @@ export default function MobileBulletproofPlayer() {
     activeRingRef.current = null;
   };
 
-  const handleCenterClick = () => {
-    if (screen === "nowPlaying") {
-      triggerHaptic("confirm", hapticsOn);
-      wakeUpAudioCtx();
-      if (currentSong) {
-        setIsPlaying(!isPlaying);
-      }
-      return;
-    }
-    
-    if (screen === "eq") {
-      triggerHaptic("confirm", hapticsOn);
-      setEqEditMode(!eqEditMode);
+  const activateMenuItem = (selectedItem: MenuItem | undefined) => {
+    if (!selectedItem) return;
+    triggerHaptic("select", hapticsOn);
+
+    if (selectedItem.type === "menu" && selectedItem.targetId) {
+      setMenuStack((previous) => [...previous, selectedItem.targetId!]);
+      setSelectedIndex(0);
       return;
     }
 
-    const selectedItem = currentMenu.items[selectedIndex];
-
-    if (selectedItem?.type === "menu" && selectedItem.targetId) {
-      triggerHaptic("select", hapticsOn);
-      setMenuStack([...menuStack, selectedItem.targetId]);
-      setSelectedIndex(0); 
-    } else if (selectedItem?.type === "song" && selectedItem.song) {
+    if (selectedItem.type === "song" && selectedItem.song) {
       if (currentSong?.file === selectedItem.song.file) {
         setScreen("nowPlaying");
       } else {
-        const songIdx = localSongs.findIndex(s => s.file === selectedItem.song?.file);
+        const songIdx = localSongs.findIndex((song) => song.file === selectedItem.song?.file);
         playSong(selectedItem.song, songIdx >= 0 ? songIdx : 0);
       }
-    } else if (selectedItem?.type === "action") {
-      switch(selectedItem.actionId) {
+      return;
+    }
+
+    if (selectedItem.type !== "action") return;
+    if (selectedItem.actionId === "playlist_add_song" && selectedItem.playlistId && selectedItem.song) {
+      addSongToPlaylist(selectedItem.playlistId, selectedItem.song);
+      return;
+    }
+    if (selectedItem.actionId?.startsWith("rename_playlist:")) {
+      const playlistId = selectedItem.actionId.slice("rename_playlist:".length);
+      const playlist = playlists.find((item) => item.id === playlistId);
+      const name = playlist && window.prompt("Rename playlist", playlist.name)?.trim();
+      if (name) setPlaylists((previous) => previous.map((item) => item.id === playlistId ? { ...item, name } : item));
+      return;
+    }
+    if (selectedItem.actionId?.startsWith("delete_playlist:")) {
+      const playlistId = selectedItem.actionId.slice("delete_playlist:".length);
+      const playlist = playlists.find((item) => item.id === playlistId);
+      if (playlist && window.confirm(`Delete playlist "${playlist.name}"?`)) {
+        setPlaylists((previous) => previous.filter((item) => item.id !== playlistId));
+        setMenuStack((previous) => previous.slice(0, -1));
+        setSelectedIndex(0);
+      }
+      return;
+    }
+
+    switch(selectedItem.actionId) {
+        case "create_playlist":
+          createPlaylist();
+          break;
         case "open_eq":
           ensureAudioGraph();
           wakeUpAudioCtx();
@@ -1191,19 +1378,19 @@ export default function MobileBulletproofPlayer() {
           fileInputRef.current?.click();
           break;
         case "cycle_sort":
-          setSortMode(prev => prev === "default" ? "a-z" : prev === "a-z" ? "z-a" : "default");
+          setSortMode((prev) => prev === "default" ? "a-z" : prev === "a-z" ? "z-a" : "default");
           break;
         case "toggle_haptics":
-          setHapticsOn(!hapticsOn);
+          setHapticsOn((previous) => !previous);
           break;
         case "toggle_shuffle":
-          setShuffleOn(!shuffleOn);
+          toggleShuffle();
           break;
         case "cycle_repeat":
-          setRepeatMode(repeatMode === "off" ? "all" : repeatMode === "all" ? "one" : "off");
+          cycleRepeat();
           break;
         case "toggle_clock":
-          setClock24h(!clock24h);
+          setClock24h((previous) => !previous);
           break;
         case "sleep_off":
           setSleepTimerEndAt(null);
@@ -1221,7 +1408,7 @@ export default function MobileBulletproofPlayer() {
           setSleepTimerEndAt(Date.now() + 60 * 60 * 1000);
           break;
         case "clear_library":
-          if (typeof window !== "undefined" && window.confirm("Remove all imported songs from this device? This can't be undone.")) {
+          if (window.confirm("Remove all imported songs from this device? This can't be undone.")) {
             clearLocalLibrary();
           }
           break;
@@ -1272,12 +1459,30 @@ export default function MobileBulletproofPlayer() {
         default:
           if (selectedItem.actionId?.startsWith("delete_song:")) {
             const fileName = selectedItem.actionId.replace("delete_song:", "");
-            if (typeof window !== "undefined" && window.confirm(`Remove ${fileName} from device?`)) {
+            if (window.confirm(`Remove ${fileName} from device?`)) {
               removeSpecificSong(fileName);
             }
           }
-      }
     }
+  };
+
+  const handleCenterClick = () => {
+    if (screen === "nowPlaying") {
+      triggerHaptic("confirm", hapticsOn);
+      wakeUpAudioCtx();
+      if (currentSong) {
+        setIsPlaying(!isPlaying);
+      }
+      return;
+    }
+
+    if (screen === "eq") {
+      triggerHaptic("confirm", hapticsOn);
+      setEqEditMode(!eqEditMode);
+      return;
+    }
+
+    activateMenuItem(currentMenu.items[selectedIndex]);
   };
 
   const handleGlobalPlayPause = (e: React.MouseEvent | React.TouchEvent) => {
@@ -1327,22 +1532,22 @@ export default function MobileBulletproofPlayer() {
       case "vaporwave": return { bg: "from-[#ff71ce] to-[#01cdfe]", text: "text-[#05ffa1]", border: "border-[#b967ff]", selectedBg: "bg-[#b967ff]", selectedText: "text-[#fffb96]" };
       case "sepia": return { bg: "from-[#e4d0b8] to-[#c7a982]", text: "text-[#5e4022]", border: "border-[#5e4022]", selectedBg: "bg-[#5e4022]", selectedText: "text-[#e4d0b8]" };
       case "midnight": return { bg: "from-[#0f172a] to-[#020617]", text: "text-[#38bdf8]", border: "border-[#38bdf8]", selectedBg: "bg-[#38bdf8]", selectedText: "text-[#020617]" };
-      case "arctic": return { bg: "from-[#e0f7fa] to-[#80deea]", text: "text-[#064663]", border: "border-[#064663]", selectedBg: "bg-[#064663]", selectedText: "text-[#e0f7fa]" };
-      case "copper": return { bg: "from-[#f4d3b2] to-[#b87333]", text: "text-[#3d2111]", border: "border-[#3d2111]", selectedBg: "bg-[#3d2111]", selectedText: "text-[#f4d3b2]" };
+      case "arctic": return { bg: "from-[#dfe8f2] to-[#a8b8cb]", text: "text-[#252f3d]", border: "border-[#525f70]", selectedBg: "bg-[#252f3d]", selectedText: "text-[#edf2f8]" };
+      case "copper": return { bg: "from-[#30343b] to-[#17191d]", text: "text-[#f1b77a]", border: "border-[#c67c43]", selectedBg: "bg-[#c67c43]", selectedText: "text-[#17191d]" };
       case "forest": return { bg: "from-[#b7d7a8] to-[#52734d]", text: "text-[#152b1c]", border: "border-[#152b1c]", selectedBg: "bg-[#152b1c]", selectedText: "text-[#b7d7a8]" };
       case "graphite": return { bg: "from-[#43464b] to-[#17191d]", text: "text-[#f0f1f2]", border: "border-[#aeb4bd]", selectedBg: "bg-[#d7dbe0]", selectedText: "text-[#202328]" };
-      case "champagne": return { bg: "from-[#fff2d8] to-[#d5b98c]", text: "text-[#4a3824]", border: "border-[#806443]", selectedBg: "bg-[#806443]", selectedText: "text-[#fff2d8]" };
+      case "champagne": return { bg: "from-[#263238] to-[#101619]", text: "text-[#f4e4bd]", border: "border-[#d6b873]", selectedBg: "bg-[#d6b873]", selectedText: "text-[#22282b]" };
       case "burgundy": return { bg: "from-[#641e35] to-[#260d1a]", text: "text-[#ffe8e7]", border: "border-[#e7a6a6]", selectedBg: "bg-[#e7a6a6]", selectedText: "text-[#34101d]" };
-      case "rose-gold": return { bg: "from-[#f5d5ca] to-[#bd8177]", text: "text-[#482b2b]", border: "border-[#704347]", selectedBg: "bg-[#704347]", selectedText: "text-[#fce8df]" };
-      case "sage": return { bg: "from-[#e3eadb] to-[#a8b89d]", text: "text-[#344235]", border: "border-[#526452]", selectedBg: "bg-[#526452]", selectedText: "text-[#eef2e8]" };
-      case "alpine": return { bg: "from-[#f3f6f2] to-[#a8c0bd]", text: "text-[#263c42]", border: "border-[#45656b]", selectedBg: "bg-[#45656b]", selectedText: "text-[#f3f6f2]" };
-      case "ocean-depths": return { bg: "from-[#164e63] to-[#082f49]", text: "text-[#d7f3f4]", border: "border-[#67c8c4]", selectedBg: "bg-[#67c8c4]", selectedText: "text-[#073747]" };
-      case "aurora": return { bg: "from-[#153a45] to-[#30254f]", text: "text-[#d5fff1]", border: "border-[#8ee8c2]", selectedBg: "bg-[#8ee8c2]", selectedText: "text-[#17353e]" };
-      case "cobalt": return { bg: "from-[#244b9b] to-[#122454]", text: "text-[#e8efff]", border: "border-[#91b5ff]", selectedBg: "bg-[#91b5ff]", selectedText: "text-[#13244b]" };
+      case "rose-gold": return { bg: "from-[#512d37] to-[#271821]", text: "text-[#ffe6df]", border: "border-[#e7a99b]", selectedBg: "bg-[#e7a99b]", selectedText: "text-[#38212a]" };
+      case "sage": return { bg: "from-[#697366] to-[#363d35]", text: "text-[#eff0db]", border: "border-[#c5c7a3]", selectedBg: "bg-[#c5c7a3]", selectedText: "text-[#30382f]" };
+      case "alpine": return { bg: "from-[#f4fbff] to-[#a8d7e8]", text: "text-[#143b53]", border: "border-[#287b9c]", selectedBg: "bg-[#287b9c]", selectedText: "text-[#f4fbff]" };
+      case "ocean-depths": return { bg: "from-[#102a43] to-[#071521]", text: "text-[#b6e3ed]", border: "border-[#328aa0]", selectedBg: "bg-[#328aa0]", selectedText: "text-[#071521]" };
+      case "aurora": return { bg: "from-[#21113d] to-[#071d2b]", text: "text-[#f0e5ff]", border: "border-[#b6f36b]", selectedBg: "bg-[#b6f36b]", selectedText: "text-[#18231d]" };
+      case "cobalt": return { bg: "from-[#1239a5] to-[#07194e]", text: "text-[#f0f5ff]", border: "border-[#64a5ff]", selectedBg: "bg-[#64a5ff]", selectedText: "text-[#07194e]" };
       case "amethyst": return { bg: "from-[#49346f] to-[#211b3d]", text: "text-[#f0e8ff]", border: "border-[#c5a8f5]", selectedBg: "bg-[#c5a8f5]", selectedText: "text-[#2d2148]" };
       case "ember": return { bg: "from-[#5c3027] to-[#241918]", text: "text-[#ffe7d4]", border: "border-[#f2a66d]", selectedBg: "bg-[#f2a66d]", selectedText: "text-[#3c211b]" };
-      case "jade": return { bg: "from-[#d7eee3] to-[#75b6a0]", text: "text-[#153c35]", border: "border-[#286557]", selectedBg: "bg-[#286557]", selectedText: "text-[#e0f5ea]" };
-      case "inverted": return { bg: "from-[#f5f5f5] to-[#d6d6d6]", text: "text-[#121212]", border: "border-[#121212]", selectedBg: "bg-[#121212]", selectedText: "text-[#f5f5f5]" };
+      case "jade": return { bg: "from-[#075b45] to-[#032b26]", text: "text-[#e0ffe6]", border: "border-[#7af0a1]", selectedBg: "bg-[#7af0a1]", selectedText: "text-[#073629]" };
+      case "inverted": return { bg: "from-[#ffffff] to-[#ffffff]", text: "text-black", border: "border-black", selectedBg: "bg-black", selectedText: "text-white" };
       case "solarized": return { bg: "from-[#fdf6e3] to-[#eee8d5]", text: "text-[#586e75]", border: "border-[#657b83]", selectedBg: "bg-[#268bd2]", selectedText: "text-[#fdf6e3]" };
       case "oled-red": return { bg: "bg-black", text: "text-red-600", border: "border-red-900", selectedBg: "bg-red-900", selectedText: "text-black" };
       case "oled-amber": return { bg: "bg-black", text: "text-amber-500", border: "border-amber-700", selectedBg: "bg-amber-700", selectedText: "text-black" };
@@ -1352,7 +1557,7 @@ export default function MobileBulletproofPlayer() {
       case "green": return { bg: "from-[#8aff8a] to-[#40b540]", text: "text-[#0a2e0a]", border: "border-[#0a2e0a]", selectedBg: "bg-[#0a0a0a]", selectedText: "text-[#8aff8a]" };
       case "amber": return { bg: "from-[#ffd085] to-[#db9a35]", text: "text-[#3b2302]", border: "border-[#3b2302]", selectedBg: "bg-[#0a0a0a]", selectedText: "text-[#ffd085]" };
       case "gray": return { bg: "from-[#d4d4d4] to-[#a3a3a3]", text: "text-[#1f1f1f]", border: "border-[#1f1f1f]", selectedBg: "bg-[#0a0a0a]", selectedText: "text-[#d4d4d4]" };
-      case "pink": return { bg: "from-[#ffb3d9] to-[#f472b6]", text: "text-[#4a0d2e]", border: "border-[#4a0d2e]", selectedBg: "bg-[#0a0a0a]", selectedText: "text-[#ffb3d9]" };
+      case "pink": return { bg: "from-[#ffb3d9] to-[#f472b6]", text: "text-[#4a0d2e]", border: "border-[#4a0d2e]", selectedBg: "bg-[#9d174d]", selectedText: "text-[#fff1f7]" };
       case "purple": return { bg: "from-[#d3b8ff] to-[#a678ec]", text: "text-[#2c0d4d]", border: "border-[#2c0d4d]", selectedBg: "bg-[#0a0a0a]", selectedText: "text-[#d3b8ff]" };
       case "teal": return { bg: "from-[#8afcf0] to-[#33c9b8]", text: "text-[#04302b]", border: "border-[#04302b]", selectedBg: "bg-[#0a0a0a]", selectedText: "text-[#8afcf0]" };
       case "white": return { bg: "from-[#ffffff] to-[#d9dde3]", text: "text-[#1a1d22]", border: "border-[#1a1d22]", selectedBg: "bg-[#0a0a0a]", selectedText: "text-[#ffffff]" };
@@ -1498,10 +1703,7 @@ export default function MobileBulletproofPlayer() {
                     <li 
                       key={index}
                       id={`menu-item-${index}`} 
-                      onClick={() => {
-                        setSelectedIndex(index);
-                        setTimeout(() => handleCenterClick(), 50);
-                      }}
+                      onClick={() => activateMenuItem(item)}
                       className={`px-3 py-2.5 rounded transition-none text-sm md:text-base font-bold tracking-wide flex justify-between items-center cursor-pointer ${
                         selectedIndex === index ? `${theme.selectedBg} ${theme.selectedText}` : ""
                       }`}
@@ -1525,7 +1727,20 @@ export default function MobileBulletproofPlayer() {
                                 className={favoriteSongNames.includes(item.song.file.name) ? "fill-current" : ""}
                               />
                             </button>
-                            {currentMenuId === "queue" ? (
+                            {item.playlistId ? (
+                              <button
+                                type="button"
+                                aria-label={`Remove ${item.song.name} from playlist`}
+                                title="Remove from playlist"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  removeSongFromPlaylist(item.playlistId!, item.song!.file.name);
+                                }}
+                                className="p-1 rounded hover:bg-black/20"
+                              >
+                                <X size={14} />
+                              </button>
+                            ) : currentMenuId === "queue" ? (
                               <button
                                 type="button"
                                 aria-label={`Remove ${item.song.name} from queue`}
@@ -1594,7 +1809,6 @@ export default function MobileBulletproofPlayer() {
                         } else {
                           setSelectedIndex(idx);
                           setEqEditMode(true);
-                          triggerHaptic("tick", hapticsOn);
                         }
                       }}
                       className={`flex flex-col items-center gap-2 flex-1 transition-opacity cursor-pointer ${selectedIndex === idx ? 'opacity-100' : 'opacity-40'}`}
@@ -1739,11 +1953,36 @@ export default function MobileBulletproofPlayer() {
   </span>
 </div>
 
-                <div className="mt-3 flex gap-6 text-[9px] font-bold tracking-widest uppercase">
+                <div className="mt-3 flex items-center gap-3 text-[9px] font-bold tracking-widest uppercase">
                   <div className={`flex items-center gap-1.5 px-2 py-0.5 border-[1.5px] ${theme.border} rounded-sm`}>
                     <RefreshCw size={10} strokeWidth={3} />
                     <span>{playbackSpeed}x</span>
                   </div>
+                  <button
+                    type="button"
+                    aria-label={`Shuffle ${shuffleOn ? "on" : "off"}`}
+                    title={`Shuffle ${shuffleOn ? "on" : "off"}`}
+                    onClick={() => {
+                      toggleShuffle();
+                      triggerHaptic("select", hapticsOn);
+                    }}
+                    className={`p-1 rounded ${shuffleOn ? "bg-current/20" : "opacity-50"}`}
+                  >
+                    <Shuffle size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    aria-label={`Repeat ${repeatMode}`}
+                    title={`Repeat ${repeatMode}`}
+                    onClick={() => {
+                      cycleRepeat();
+                      triggerHaptic("select", hapticsOn);
+                    }}
+                    className={`flex items-center gap-1 p-1 rounded ${repeatMode !== "off" ? "bg-current/20" : "opacity-50"}`}
+                  >
+                    {repeatMode === "one" ? <Repeat1 size={14} /> : <Repeat size={14} />}
+                    <span>{repeatMode === "off" ? "OFF" : repeatMode === "one" ? "ONE" : "ALL"}</span>
+                  </button>
                 </div>
               </div>
             )}
@@ -1754,21 +1993,19 @@ export default function MobileBulletproofPlayer() {
       <div className="flex-1 w-full flex items-center justify-center p-4">
         <div 
           ref={padRef}
-          onPointerDown={(e) => handleStart(e.clientX, e.clientY)}
+          onPointerDown={(e) => {
+            if (e.target === e.currentTarget) e.currentTarget.setPointerCapture(e.pointerId);
+            handleStart(e.clientX, e.clientY);
+          }}
           onPointerMove={(e) => handleMove(e.clientX, e.clientY)}
-          onPointerUp={handleEnd}
-          onPointerCancel={handleEnd}
-          onTouchStart={(e) => {
-            if (e.touches && e.touches[0]) {
-              handleStart(e.touches[0].clientX, e.touches[0].clientY);
-            }
+          onPointerUp={(e) => {
+            if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+            handleEnd();
           }}
-          onTouchMove={(e) => {
-            if (e.touches && e.touches[0]) {
-              handleMove(e.touches[0].clientX, e.touches[0].clientY);
-            }
+          onPointerCancel={(e) => {
+            if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
+            handleEnd();
           }}
-          onTouchEnd={handleEnd}
           className="relative w-[82vw] max-w-[340px] aspect-square rounded-full border border-[#111] bg-[#0a0a0a] flex items-center justify-center cursor-grab active:cursor-grabbing shadow-[0_15px_40px_rgba(0,0,0,0.8),inset_0_1px_2px_rgba(255,255,255,0.05)]"
         >
           <div className="absolute w-[45%] aspect-square rounded-full border-[1.5px] border-black bg-[#111] flex items-center justify-center shadow-[inset_0_2px_10px_rgba(0,0,0,0.9)] pointer-events-none">
