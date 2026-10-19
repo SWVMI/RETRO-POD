@@ -2,12 +2,12 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal, Heart, ListPlus, X, Shuffle, Repeat, Repeat1 } from "lucide-react";
+import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal, Heart, ListPlus, X, Shuffle, Repeat, Repeat1, Search, Maximize, Minimize, Film, Subtitles, Settings2, Rewind, FastForward } from "lucide-react";
 import { triggerHaptic } from "@/lib/haptics";
 import AlbumCoverflow, { CoverflowItem } from "@/components/AlbumCoverflow";
 
 const formatTime = (seconds: number) => {
-  if (isNaN(seconds)) return "0:00";
+  if (!Number.isFinite(seconds)) return "0:00";
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60);
   return `${m}:${s.toString().padStart(2, "0")}`;
@@ -24,6 +24,7 @@ const lcdThemes = [
 ] as const;
 type LcdTheme = (typeof lcdThemes)[number];
 type UserPlaylist = { id: string; name: string; songNames: string[] };
+type MovieItem = { file: File; name: string };
 type DirectoryHandleWithIteration = FileSystemDirectoryHandle & {
   entries: () => AsyncIterableIterator<[string, FileSystemFileHandle | FileSystemDirectoryHandle]>;
   keys: () => AsyncIterableIterator<string>;
@@ -56,7 +57,6 @@ export default function MobileBulletproofPlayer() {
   const [repeatMode, setRepeatMode] = useState<"off" | "one" | "all">("all");
   const [clock24h, setClock24h] = useState(true);
   const [sleepTimerEndAt, setSleepTimerEndAt] = useState<number | null>(null);
-  const [sortMode, setSortMode] = useState<"default" | "a-z" | "z-a">("default");
 
   // PRO Features State
   const [showDiag, setShowDiag] = useState(false);
@@ -72,6 +72,11 @@ export default function MobileBulletproofPlayer() {
   const filtersRef = useRef<BiquadFilterNode[]>([]);
   const audioObjectUrlRef = useRef<string | null>(null);
   const playbackRequestRef = useRef(0);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const movieStageRef = useRef<HTMLDivElement | null>(null);
+  const movieInputRef = useRef<HTMLInputElement>(null);
+  const subtitleInputRef = useRef<HTMLInputElement>(null);
+  const coverSwipeStartXRef = useRef<number | null>(null);
   
   const [localSongs, setLocalSongs] = useState<SongItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -79,23 +84,26 @@ export default function MobileBulletproofPlayer() {
   const [favoriteSongNames, setFavoriteSongNames] = useState<string[]>([]);
   const [queuedSongNames, setQueuedSongNames] = useState<string[]>([]);
   const [playlists, setPlaylists] = useState<UserPlaylist[]>([]);
+  const [movies, setMovies] = useState<MovieItem[]>([]);
   const [libraryPreferencesLoaded, setLibraryPreferencesLoaded] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+  const [menuSearch, setMenuSearch] = useState("");
+  const [movieSearch, setMovieSearch] = useState("");
+  const [currentMovie, setCurrentMovie] = useState<MovieItem | null>(null);
+  const [moviePlaybackUrl, setMoviePlaybackUrl] = useState<string | null>(null);
+  const [movieIsPlaying, setMovieIsPlaying] = useState(false);
+  const [movieCurrentTime, setMovieCurrentTime] = useState(0);
+  const [movieDuration, setMovieDuration] = useState(0);
+  const [movieSpeed, setMovieSpeed] = useState(1);
+  const [subtitleUrl, setSubtitleUrl] = useState<string | null>(null);
+  const [movieFullscreen, setMovieFullscreen] = useState(false);
 
   const [menuStack, setMenuStack] = useState<string[]>(["root"]);
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [screen, setScreen] = useState<"menu" | "nowPlaying" | "eq">("menu");
-  const previousSelectedIndexRef = useRef(selectedIndex);
-
-  useEffect(() => {
-    if (previousSelectedIndexRef.current !== selectedIndex) {
-      triggerHaptic("tick", hapticsOn);
-      previousSelectedIndexRef.current = selectedIndex;
-    }
-  }, [selectedIndex, hapticsOn]);
+  const [screen, setScreen] = useState<"menu" | "nowPlaying" | "eq" | "movies" | "moviePlaying">("menu");
 
   const padRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -404,6 +412,26 @@ export default function MobileBulletproofPlayer() {
     }
   };
 
+  const loadPersistedMovies = async () => {
+    try {
+      const root = await navigator.storage.getDirectory();
+      const movieDirectory = await root.getDirectoryHandle("movies") as DirectoryHandleWithIteration;
+      const loadedMovies: MovieItem[] = [];
+      for await (const [, handle] of movieDirectory.entries()) {
+        if (handle.kind !== "file") continue;
+        const file = await handle.getFile();
+        loadedMovies.push({ file, name: file.name.replace(/\.[^/.]+$/, "") });
+      }
+      setMovies(loadedMovies);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "NotFoundError") {
+        setMovies([]);
+        return;
+      }
+      console.error("Unable to load saved movies:", error);
+    }
+  };
+
   const saveSongsToStorage = async (files: File[]) => {
     try {
       const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
@@ -421,8 +449,8 @@ export default function MobileBulletproofPlayer() {
   const clearLocalLibrary = async () => {
     try {
       const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
-      for await (const name of root.keys()) {
-        await root.removeEntry(name).catch(() => {});
+      for await (const [name, handle] of root.entries()) {
+        if (handle.kind === "file") await root.removeEntry(name);
       }
     } catch (e) {
       console.log("Storage error", e);
@@ -561,6 +589,20 @@ export default function MobileBulletproofPlayer() {
     setMenuStack((previous) => [...previous, `playlist_${id}`]);
     setSelectedIndex(0);
     triggerHaptic("confirm", hapticsOn);
+  };
+
+  const toggleMoviePlayback = () => {
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      video.play().catch((error) => {
+        console.error("Movie playback failed:", error);
+        setMovieIsPlaying(false);
+        window.alert("This video format or codec could not be played on this device.");
+      });
+    } else {
+      video.pause();
+    }
   };
 
   const toggleShuffle = () => {
@@ -841,6 +883,7 @@ export default function MobileBulletproofPlayer() {
     audio.addEventListener("ended", handleEnded);
 
     void latestLoadPersistedSongs.current();
+    void loadPersistedMovies();
 
     let batteryManager: BatteryManagerLike | null = null;
     let cancelled = false;
@@ -932,6 +975,51 @@ export default function MobileBulletproofPlayer() {
   }, [playbackSpeed]);
 
   useEffect(() => {
+    if (videoRef.current) videoRef.current.playbackRate = movieSpeed;
+  }, [movieSpeed, screen, currentMovie]);
+
+  useEffect(() => {
+    return () => {
+      if (moviePlaybackUrl) URL.revokeObjectURL(moviePlaybackUrl);
+    };
+  }, [moviePlaybackUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (subtitleUrl) URL.revokeObjectURL(subtitleUrl);
+    };
+  }, [subtitleUrl]);
+
+  useEffect(() => {
+    const syncFullscreenState = () => {
+      const isFullscreen = document.fullscreenElement === movieStageRef.current;
+      setMovieFullscreen(isFullscreen);
+      if (!isFullscreen) {
+        try {
+          const orientation = window.screen.orientation as ScreenOrientation & { unlock?: () => void };
+          orientation.unlock?.();
+        } catch (error) {
+          console.warn("Unable to unlock screen orientation:", error);
+        }
+      }
+    };
+    document.addEventListener("fullscreenchange", syncFullscreenState);
+    return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
+  }, []);
+
+  useEffect(() => {
+    if (screen !== "moviePlaying" || !videoRef.current) return;
+    if (movieIsPlaying) {
+      videoRef.current.play().catch((error) => {
+        console.error("Movie playback failed:", error);
+        setMovieIsPlaying(false);
+      });
+    } else {
+      videoRef.current.pause();
+    }
+  }, [movieIsPlaying, screen, moviePlaybackUrl]);
+
+  useEffect(() => {
     isPlayingRef.current = isPlaying;
     if ("mediaSession" in navigator) {
       navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
@@ -980,12 +1068,6 @@ export default function MobileBulletproofPlayer() {
     });
   }, [currentSong, localSongs, currentIndex]);
 
-  const sortedLocalSongs = useMemo(() => {
-    if (sortMode === "a-z") return [...localSongs].sort((a, b) => a.name.localeCompare(b.name));
-    if (sortMode === "z-a") return [...localSongs].sort((a, b) => b.name.localeCompare(a.name));
-    return localSongs;
-  }, [localSongs, sortMode]);
-
   // --- MENUS & UI LOGIC ---
   const menus = useMemo((): Record<string, Menu> => {
     const favoriteSongs = favoriteSongNames
@@ -999,14 +1081,12 @@ export default function MobileBulletproofPlayer() {
       const playlistSongs = playlist.songNames
         .map((name) => localSongs.find((song) => song.file.name === name))
         .filter((song): song is SongItem => song !== undefined);
-      const addableSongs = sortedLocalSongs.filter((song) => !playlist.songNames.includes(song.file.name));
+      const addableSongs = localSongs.filter((song) => !playlist.songNames.includes(song.file.name));
       playlistMenus[`playlist_${playlist.id}`] = {
         id: `playlist_${playlist.id}`,
         title: playlist.name,
         items: [
-          { label: "[ Add Songs ]", type: "menu", targetId: `playlist_add_${playlist.id}` },
-          { label: "[ Rename Playlist ]", type: "action", actionId: `rename_playlist:${playlist.id}` },
-          { label: "[ Delete Playlist ]", type: "action", actionId: `delete_playlist:${playlist.id}` },
+          { label: "Options", type: "menu", targetId: `playlist_options_${playlist.id}` },
           ...(playlistSongs.length
             ? playlistSongs.map((song) => ({
                 label: song.name,
@@ -1030,6 +1110,15 @@ export default function MobileBulletproofPlayer() {
             }))
           : [{ label: "(All library songs are added)", type: "action" as const, actionId: "noop" }],
       };
+      playlistMenus[`playlist_options_${playlist.id}`] = {
+        id: `playlist_options_${playlist.id}`,
+        title: `${playlist.name} Options`,
+        items: [
+          { label: "Add Songs", type: "menu", targetId: `playlist_add_${playlist.id}` },
+          { label: "Rename Playlist", type: "action", actionId: `rename_playlist:${playlist.id}` },
+          { label: "Delete Playlist", type: "action", actionId: `delete_playlist:${playlist.id}` },
+        ],
+      };
     });
 
     return {
@@ -1040,6 +1129,7 @@ export default function MobileBulletproofPlayer() {
         items: [
           ...(currentSong ? [{ label: "Now Playing", type: "action" as const, actionId: "go_now_playing" }] : []),
           { label: "Local Audio Library", type: "menu", targetId: "local" },
+          { label: "Movies", type: "action", actionId: "open_movies" },
           { label: "Playback Tools", type: "menu", targetId: "tools" },
           { label: "System Settings", type: "menu", targetId: "settings" }
         ]
@@ -1067,17 +1157,14 @@ export default function MobileBulletproofPlayer() {
       },
       local: {
         id: "local",
-        title: "Local Dashboard",
+        title: "Music Library",
         items: [
           { label: "All Songs", type: "menu", targetId: "local_songs" },
-          { label: `Favorites (${favoriteSongNames.length})`, type: "menu", targetId: "favorites" },
-          { label: `Play Queue (${queuedSongNames.length})`, type: "menu", targetId: "queue" },
-          { label: `Playlists (${playlists.length})`, type: "menu", targetId: "playlists" },
           { label: "[ Import New Songs ]", type: "action", actionId: "scan_local" },
-          ...(queuedSongNames.length > 0
-            ? [{ label: "[ Clear Play Queue ]", type: "action" as const, actionId: "clear_queue" }]
-            : []),
-          { label: `[ Sort: ${sortMode.toUpperCase()} ]`, type: "action", actionId: "cycle_sort" },
+          { label: `Favorites (${favoriteSongNames.length})`, type: "menu", targetId: "favorites" },
+          { label: `Playlists (${playlists.length})`, type: "menu", targetId: "playlists" },
+          { label: `Play Queue (${queuedSongNames.length})`, type: "menu", targetId: "queue" },
+          { label: "[ Clear Play Queue ]", type: "action", actionId: "clear_queue" },
           { label: "[ Manage & Remove ]", type: "menu", targetId: "local_edit" }
         ]
       },
@@ -1098,8 +1185,8 @@ export default function MobileBulletproofPlayer() {
       local_songs: {
         id: "local_songs",
         title: "All Songs",
-        items: sortedLocalSongs.length > 0 
-          ? sortedLocalSongs.map((song) => ({
+        items: localSongs.length > 0
+          ? localSongs.map((song) => ({
               label: song.name,
               type: "song" as const,
               song: song
@@ -1109,8 +1196,8 @@ export default function MobileBulletproofPlayer() {
       local_edit: {
         id: "local_edit",
         title: "Remove Songs",
-        items: sortedLocalSongs.length > 0
-          ? sortedLocalSongs.map((song) => ({
+        items: localSongs.length > 0
+          ? localSongs.map((song) => ({
               label: `🗑 ${song.name}`,
               type: "action" as const,
               actionId: `delete_song:${song.file.name}`
@@ -1150,20 +1237,20 @@ export default function MobileBulletproofPlayer() {
         id: "settings_theme",
         title: "LCD Theme",
         items: [
-          { label: "Burgundy · Premium", type: "action", actionId: "theme_burgundy" },
-          { label: "Graphite · Premium", type: "action", actionId: "theme_graphite" },
-          { label: "Champagne · Premium", type: "action", actionId: "theme_champagne" },
-          { label: "Rose Gold · Premium", type: "action", actionId: "theme_rose-gold" },
-          { label: "Sage · Premium", type: "action", actionId: "theme_sage" },
-          { label: "Alpine · Premium", type: "action", actionId: "theme_alpine" },
-          { label: "Ocean Depths · Premium", type: "action", actionId: "theme_ocean-depths" },
-          { label: "Aurora · Premium", type: "action", actionId: "theme_aurora" },
-          { label: "Cobalt · Premium", type: "action", actionId: "theme_cobalt" },
-          { label: "Amethyst · Premium", type: "action", actionId: "theme_amethyst" },
-          { label: "Ember · Premium", type: "action", actionId: "theme_ember" },
-          { label: "Jade · Premium", type: "action", actionId: "theme_jade" },
-          { label: "Inverted · Premium", type: "action", actionId: "theme_inverted" },
-          { label: "Solarized · Premium", type: "action", actionId: "theme_solarized" },
+          { label: "Burgundy", type: "action", actionId: "theme_burgundy" },
+          { label: "Graphite", type: "action", actionId: "theme_graphite" },
+          { label: "Champagne", type: "action", actionId: "theme_champagne" },
+          { label: "Rose Gold", type: "action", actionId: "theme_rose-gold" },
+          { label: "Sage", type: "action", actionId: "theme_sage" },
+          { label: "Alpine", type: "action", actionId: "theme_alpine" },
+          { label: "Ocean Depths", type: "action", actionId: "theme_ocean-depths" },
+          { label: "Aurora", type: "action", actionId: "theme_aurora" },
+          { label: "Cobalt", type: "action", actionId: "theme_cobalt" },
+          { label: "Amethyst", type: "action", actionId: "theme_amethyst" },
+          { label: "Ember", type: "action", actionId: "theme_ember" },
+          { label: "Jade", type: "action", actionId: "theme_jade" },
+          { label: "Inverted", type: "action", actionId: "theme_inverted" },
+          { label: "Solarized", type: "action", actionId: "theme_solarized" },
           { label: "Cyberpunk", type: "action", actionId: "theme_cyberpunk" },
           { label: "Vaporwave", type: "action", actionId: "theme_vaporwave" },
           { label: "Midnight", type: "action", actionId: "theme_midnight" },
@@ -1191,11 +1278,9 @@ export default function MobileBulletproofPlayer() {
   }, [
     currentSong,
     playlists,
-    sortedLocalSongs,
     localSongs,
     favoriteSongNames,
     queuedSongNames,
-    sortMode,
     hapticsOn,
     shuffleOn,
     repeatMode,
@@ -1205,6 +1290,32 @@ export default function MobileBulletproofPlayer() {
 
   const currentMenuId = menuStack[menuStack.length - 1];
   const currentMenu = menus[currentMenuId] || menus.root;
+  const isSearchableMenu =
+    currentMenuId === "local_songs" ||
+    currentMenuId === "favorites" ||
+    currentMenuId === "queue" ||
+    currentMenuId === "playlists" ||
+    currentMenuId === "local_edit" ||
+    (currentMenuId.startsWith("playlist_") && !currentMenuId.startsWith("playlist_options_"));
+  const visibleMenuItems = isSearchableMenu && menuSearch.trim()
+    ? currentMenu.items.filter((item) => item.label.toLocaleLowerCase().includes(menuSearch.trim().toLocaleLowerCase()))
+    : currentMenu.items;
+  const visibleMovies = movies.filter((movie) =>
+    movie.name.toLocaleLowerCase().includes(movieSearch.trim().toLocaleLowerCase())
+  );
+
+  useEffect(() => {
+    setMenuSearch("");
+    setSelectedIndex(0);
+  }, [currentMenuId]);
+
+  useEffect(() => {
+    if (selectedIndex >= visibleMenuItems.length && visibleMenuItems.length > 0) {
+      setSelectedIndex(visibleMenuItems.length - 1);
+    } else if (visibleMenuItems.length === 0 && selectedIndex !== 0) {
+      setSelectedIndex(0);
+    }
+  }, [selectedIndex, visibleMenuItems.length]);
 
   useEffect(() => {
     if (screen === "menu") {
@@ -1286,20 +1397,24 @@ export default function MobileBulletproofPlayer() {
             return newGains;
           });
         } else {
-          setSelectedIndex((prev) => {
-            let next = prev + (steps * direction);
-            if (next < 0) next = 0;
-            if (next > 4) next = 4;
-            return next;
-          });
+          const next = Math.max(0, Math.min(4, selectedIndex + steps * direction));
+          if (next !== selectedIndex) {
+            setSelectedIndex(next);
+            triggerHaptic("tick", hapticsOn);
+          }
         }
       } else if (activeRingRef.current === "outer" && screen === "menu") {
-        setSelectedIndex((prev) => {
-          let next = prev + (steps * direction);
-          if (next < 0) next = 0;
-          if (next >= currentMenu.items.length) next = currentMenu.items.length - 1;
-          return next;
-        });
+        const next = Math.max(0, Math.min(visibleMenuItems.length - 1, selectedIndex + steps * direction));
+        if (next !== selectedIndex) {
+          setSelectedIndex(next);
+          triggerHaptic("tick", hapticsOn);
+        }
+      } else if (activeRingRef.current === "outer" && screen === "movies") {
+        const next = Math.max(0, Math.min(visibleMovies.length - 1, selectedIndex + steps * direction));
+        if (next !== selectedIndex) {
+          setSelectedIndex(next);
+          triggerHaptic("tick", hapticsOn);
+        }
       } else if (activeRingRef.current === "inner" && screen === "nowPlaying") {
         setPlaybackSpeed((prev) => {
           let newSpeed = prev + (steps * direction * 0.05);
@@ -1354,7 +1469,7 @@ export default function MobileBulletproofPlayer() {
       const playlist = playlists.find((item) => item.id === playlistId);
       if (playlist && window.confirm(`Delete playlist "${playlist.name}"?`)) {
         setPlaylists((previous) => previous.filter((item) => item.id !== playlistId));
-        setMenuStack((previous) => previous.slice(0, -1));
+        setMenuStack((previous) => previous.slice(0, -2));
         setSelectedIndex(0);
       }
       return;
@@ -1374,11 +1489,13 @@ export default function MobileBulletproofPlayer() {
         case "go_now_playing":
           setScreen("nowPlaying");
           break;
+        case "open_movies":
+          setMovieSearch("");
+          setScreen("movies");
+          setSelectedIndex(0);
+          break;
         case "scan_local":
           fileInputRef.current?.click();
-          break;
-        case "cycle_sort":
-          setSortMode((prev) => prev === "default" ? "a-z" : prev === "a-z" ? "z-a" : "default");
           break;
         case "toggle_haptics":
           setHapticsOn((previous) => !previous);
@@ -1467,6 +1584,19 @@ export default function MobileBulletproofPlayer() {
   };
 
   const handleCenterClick = () => {
+    if (screen === "movies") {
+      const movie = visibleMovies[selectedIndex];
+      if (movie) playMovie(movie);
+      else movieInputRef.current?.click();
+      return;
+    }
+
+    if (screen === "moviePlaying") {
+      toggleMoviePlayback();
+      triggerHaptic("confirm", hapticsOn);
+      return;
+    }
+
     if (screen === "nowPlaying") {
       triggerHaptic("confirm", hapticsOn);
       wakeUpAudioCtx();
@@ -1487,6 +1617,10 @@ export default function MobileBulletproofPlayer() {
 
   const handleGlobalPlayPause = (e: React.MouseEvent | React.TouchEvent) => {
     e.stopPropagation();
+    if (screen === "moviePlaying") {
+      toggleMoviePlayback();
+      return;
+    }
     wakeUpAudioCtx();
 
     if (currentSong) {
@@ -1494,9 +1628,31 @@ export default function MobileBulletproofPlayer() {
     }
   };
 
+  const handleCoverSwipeStart = (event: React.PointerEvent<HTMLDivElement>) => {
+    coverSwipeStartXRef.current = event.clientX;
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+
+  const handleCoverSwipeEnd = (event: React.PointerEvent<HTMLDivElement>) => {
+    const startX = coverSwipeStartXRef.current;
+    coverSwipeStartXRef.current = null;
+    if (startX === null) return;
+    const distance = event.clientX - startX;
+    if (Math.abs(distance) < 48) return;
+    if (distance < 0) handleNextSong();
+    else handlePrevSong();
+    triggerHaptic("select", hapticsOn);
+  };
+
   const handleMenuClick = (e: React.MouseEvent | React.TouchEvent) => {
     e.stopPropagation(); 
-    if (screen === "eq") {
+    if (screen === "moviePlaying") {
+      videoRef.current?.pause();
+      setMovieIsPlaying(false);
+      setScreen("movies");
+    } else if (screen === "movies") {
+      setScreen("menu");
+    } else if (screen === "eq") {
       if (eqEditMode) {
         setEqEditMode(false);
       } else {
@@ -1523,6 +1679,133 @@ export default function MobileBulletproofPlayer() {
       const updatedList = [...localSongs, ...newSongs];
       setLocalSongs(updatedList);
       saveSongsToStorage(newFiles);
+    }
+    e.target.value = "";
+  };
+
+  const handleMovieUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    if (files.length === 0) return;
+    try {
+      const root = await navigator.storage.getDirectory();
+      const movieDirectory = await root.getDirectoryHandle("movies", { create: true });
+      const addedMovies: MovieItem[] = [];
+      for (const file of files) {
+        if (!file.type.startsWith("video/") && !/\.(mp4|m4v|webm|mov|ogv|mkv)$/i.test(file.name)) {
+          console.warn(`Skipping unsupported movie file: ${file.name}`);
+          continue;
+        }
+        const fileHandle = await movieDirectory.getFileHandle(file.name, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(file);
+        await writable.close();
+        addedMovies.push({ file, name: file.name.replace(/\.[^/.]+$/, "") });
+      }
+      if (addedMovies.length > 0) {
+        setMovies((previous) => [
+          ...previous.filter((movie) => !addedMovies.some((added) => added.file.name === movie.file.name)),
+          ...addedMovies,
+        ]);
+      }
+      if (addedMovies.length !== files.length) {
+        window.alert("Some files were skipped. Choose a supported video file (such as MP4) to import.");
+      }
+    } catch (error) {
+      console.error("Unable to import movies into local storage:", error);
+      window.alert("Could not save the selected movie. Check available device storage and try again.");
+    }
+  };
+
+  const playMovie = (movie: MovieItem) => {
+    setMoviePlaybackUrl(URL.createObjectURL(movie.file));
+    setCurrentMovie(movie);
+    setSubtitleUrl(null);
+    setMovieCurrentTime(0);
+    setMovieDuration(0);
+    setScreen("moviePlaying");
+    setMovieIsPlaying(true);
+    if (isPlayingRef.current) setIsPlaying(false);
+    triggerHaptic("confirm", hapticsOn);
+  };
+
+  const deleteMovie = async (movie: MovieItem) => {
+    if (!window.confirm(`Delete "${movie.name}" from this device?`)) return;
+    try {
+      const root = await navigator.storage.getDirectory();
+      const movieDirectory = await root.getDirectoryHandle("movies");
+      await movieDirectory.removeEntry(movie.file.name);
+      setMovies((previous) => previous.filter((item) => item.file.name !== movie.file.name));
+      if (currentMovie?.file.name === movie.file.name) {
+        videoRef.current?.pause();
+        setMovieIsPlaying(false);
+        setCurrentMovie(null);
+        setMoviePlaybackUrl(null);
+        setScreen("movies");
+      }
+    } catch (error) {
+      console.error(`Unable to delete movie ${movie.file.name}:`, error);
+      window.alert("Could not delete this movie from device storage.");
+    }
+  };
+
+  const skipMovie = (seconds: number) => {
+    const video = videoRef.current;
+    if (!video || !Number.isFinite(video.duration)) return;
+    const nextTime = Math.max(0, Math.min(video.duration, video.currentTime + seconds));
+    video.currentTime = nextTime;
+    setMovieCurrentTime(nextTime);
+  };
+
+  const cycleMovieSpeed = () => {
+    const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
+    const currentSpeedIndex = speeds.indexOf(movieSpeed);
+    setMovieSpeed(speeds[(currentSpeedIndex + 1) % speeds.length]);
+    triggerHaptic("select", hapticsOn);
+  };
+
+  const toggleMovieFullscreen = async () => {
+    const stage = movieStageRef.current;
+    if (!stage) return;
+    try {
+      if (document.fullscreenElement === stage) {
+        await document.exitFullscreen();
+        return;
+      }
+      await stage.requestFullscreen();
+      setMovieFullscreen(true);
+      try {
+        const orientation = window.screen.orientation as ScreenOrientation & {
+          lock?: (value: "landscape") => Promise<void>;
+        };
+        if (orientation.lock) await orientation.lock("landscape");
+      } catch (error) {
+        console.warn("Landscape orientation lock is unavailable on this device:", error);
+      }
+    } catch (error) {
+      console.error("Unable to enter movie fullscreen:", error);
+      window.alert("Fullscreen playback is not supported by this device.");
+    }
+  };
+
+  const handleSubtitleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    try {
+      let subtitleText = await file.text();
+      if (/\.srt$/i.test(file.name)) {
+        subtitleText = `WEBVTT\n\n${subtitleText
+          .replace(/^\uFEFF/, "")
+          .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, "$1.$2")}`;
+      } else if (!subtitleText.trimStart().startsWith("WEBVTT")) {
+        throw new Error("Subtitle file must be WebVTT (.vtt) or SubRip (.srt).");
+      }
+      const url = URL.createObjectURL(new Blob([subtitleText], { type: "text/vtt" }));
+      setSubtitleUrl(url);
+    } catch (error) {
+      console.error("Unable to load subtitles:", error);
+      window.alert(error instanceof Error ? error.message : "Unable to load this subtitle file.");
     }
   };
 
@@ -1582,12 +1865,13 @@ export default function MobileBulletproofPlayer() {
   }));
 
   const coverflowActiveIndex = currentIndex;
+  const isSubtitleFileSelected = Boolean(subtitleUrl);
   const memoryUsageBytes = typeof performance !== "undefined"
     ? (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize
     : undefined;
 
   return (
-<div className="fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 pt-0 pb-0">      {/* --- Secret Developer Diagnostics HUD --- */}
+<div className="fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 p-3 pt-[max(1.5rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]">      {/* --- Secret Developer Diagnostics HUD --- */}
       {showDiag && (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-black/90 border border-green-500 text-green-400 text-[10px] p-3 rounded-lg z-[100] font-mono shadow-[0_0_20px_rgba(0,255,0,0.2)] w-3/4 max-w-xs">
           <p className="font-bold border-b border-green-500/50 pb-1 mb-2 text-center uppercase tracking-widest">Diagnostics</p>
@@ -1614,6 +1898,7 @@ export default function MobileBulletproofPlayer() {
                   <li>• <b>Menu Button:</b> Click to go back to the previous screen.</li>
                   <li>• <b>Direct Touch:</b> You can tap menu items directly on the screen!</li>
                   <li>• <b>Library:</b> Use the heart to save favorites and the list-plus button to queue a song. Queued songs play next.</li>
+                  <li>• <b>Movies:</b> Import downloaded videos, load VTT/SRT subtitles, and swipe the album artwork left or right to change tracks.</li>
                 </ul>
               </section>
 
@@ -1660,8 +1945,10 @@ export default function MobileBulletproofPlayer() {
       )}
 
       <input type="file" ref={fileInputRef} className="hidden" accept="audio/*" multiple onChange={handleFileUpload} />
+      <input type="file" ref={movieInputRef} className="hidden" accept="video/*,.mp4,.m4v,.webm,.mov,.ogv,.mkv" multiple onChange={handleMovieUpload} />
+      <input type="file" ref={subtitleInputRef} className="hidden" accept=".vtt,.srt,text/vtt,application/x-subrip" onChange={handleSubtitleUpload} />
 
-      <div className="w-full h-[42%] p-4 pb-2 flex flex-col">
+      <div className="w-full h-[42%] p-1 pb-2 flex flex-col shrink-0">
         <div className="w-full h-full bg-[#27272a] rounded-[2rem] p-3 shadow-[0_20px_40px_rgba(0,0,0,0.5),inset_0_1px_2px_rgba(255,255,255,0.1)] border border-[#3f3f46] flex flex-col relative">
           
           <div className={`w-full h-full bg-gradient-to-b ${theme.bg} rounded-xl relative overflow-hidden shadow-[inset_0_4px_15px_rgba(0,0,0,0.5)] border border-[#1a1a1a] flex flex-col p-4 ${theme.text}`}>
@@ -1684,7 +1971,7 @@ export default function MobileBulletproofPlayer() {
             </AnimatePresence>
 
             <div className={`flex justify-between items-center text-[11px] font-bold tracking-[0.15em] border-b ${theme.border}/30 pb-2 mb-3 uppercase relative z-10`}>
-              <span>{screen === "nowPlaying" ? "Now Playing" : screen === "eq" ? "Equalizer" : currentMenu.title}</span>
+              <span>{screen === "nowPlaying" ? "Now Playing" : screen === "eq" ? "Equalizer" : screen === "movies" ? "Movies" : screen === "moviePlaying" ? currentMovie?.name ?? "Movie" : currentMenu.title}</span>
               
               <div className="flex items-center gap-1.5">
                 <span className="tracking-normal normal-case">{currentTimeStr}</span>
@@ -1698,8 +1985,36 @@ export default function MobileBulletproofPlayer() {
             
             {screen === "menu" ? (
               <div className="flex-1 overflow-y-auto flex flex-col justify-start pt-1 no-scrollbar relative z-10">
+                {isSearchableMenu && (
+                  <label className={`sticky top-0 z-20 flex items-center gap-2 px-3 py-2 mb-2 rounded border ${theme.border}/50 bg-black/20 backdrop-blur touch-auto`}>
+                    <Search size={15} className="shrink-0 opacity-70" />
+                    <input
+                      type="search"
+                      value={menuSearch}
+                      onChange={(event) => {
+                        setMenuSearch(event.target.value);
+                        setSelectedIndex(0);
+                      }}
+                      onClick={(event) => event.stopPropagation()}
+                      onPointerDown={(event) => event.stopPropagation()}
+                      placeholder="Search"
+                      aria-label={`Search ${currentMenu.title}`}
+                      className="min-w-0 flex-1 bg-transparent text-sm font-semibold outline-none placeholder:opacity-60 select-text"
+                    />
+                    {menuSearch && (
+                      <button
+                        type="button"
+                        aria-label="Clear search"
+                        onClick={() => setMenuSearch("")}
+                        className="p-1 opacity-70"
+                      >
+                        <X size={14} />
+                      </button>
+                    )}
+                  </label>
+                )}
                 <ul className="space-y-1">
-                  {currentMenu.items.map((item, index) => (
+                  {visibleMenuItems.map((item, index) => (
                     <li 
                       key={index}
                       id={`menu-item-${index}`} 
@@ -1775,6 +2090,132 @@ export default function MobileBulletproofPlayer() {
                     </li>
                   ))}
                 </ul>
+                {isSearchableMenu && visibleMenuItems.length === 0 && (
+                  <p className="px-3 py-3 text-sm opacity-70">No matches found.</p>
+                )}
+              </div>
+            ) : screen === "movies" ? (
+              <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 relative z-10">
+                <label className={`sticky top-0 z-20 flex items-center gap-2 px-3 py-2 rounded border ${theme.border}/50 bg-black/20 backdrop-blur touch-auto`}>
+                  <Search size={15} className="shrink-0 opacity-70" />
+                  <input
+                    type="search"
+                    value={movieSearch}
+                    onChange={(event) => {
+                      setMovieSearch(event.target.value);
+                      setSelectedIndex(0);
+                    }}
+                    onClick={(event) => event.stopPropagation()}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    placeholder="Find a movie"
+                    aria-label="Search movies"
+                    className="min-w-0 flex-1 bg-transparent text-sm font-semibold outline-none placeholder:opacity-60 select-text"
+                  />
+                  {movieSearch && (
+                    <button type="button" aria-label="Clear movie search" onClick={() => setMovieSearch("")} className="p-1 opacity-70">
+                      <X size={14} />
+                    </button>
+                  )}
+                </label>
+                <button
+                  type="button"
+                  onClick={() => movieInputRef.current?.click()}
+                  className={`flex items-center justify-center gap-2 rounded border ${theme.border}/60 px-3 py-2 text-sm font-bold`}
+                >
+                  <Film size={16} /> Import Movies
+                </button>
+                <p className="px-1 text-[9px] opacity-70">MP4 with H.264 video and AAC audio works on the widest range of devices.</p>
+                <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar">
+                  {visibleMovies.map((movie, index) => (
+                    <div
+                      key={movie.file.name}
+                      className={`flex items-center gap-2 px-3 py-2 rounded text-sm font-bold ${
+                        selectedIndex === index ? `${theme.selectedBg} ${theme.selectedText}` : ""
+                      }`}
+                    >
+                      <button type="button" onClick={() => playMovie(movie)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+                        <Film size={15} className="shrink-0" />
+                        <span className="truncate">{movie.name}</span>
+                      </button>
+                      <button type="button" aria-label={`Delete ${movie.name}`} onClick={() => deleteMovie(movie)} className="p-1">
+                        <X size={14} />
+                      </button>
+                    </div>
+                  ))}
+                  {visibleMovies.length === 0 && (
+                    <p className="px-3 py-3 text-sm opacity-70">
+                      {movieSearch ? "No movies match your search." : "Import an offline video to start your movie library."}
+                    </p>
+                  )}
+                </div>
+              </div>
+            ) : screen === "moviePlaying" && currentMovie ? (
+              <div
+                ref={movieStageRef}
+                className={`flex-1 min-h-0 flex flex-col items-center justify-center gap-2 relative z-10 bg-black/90 rounded-lg p-2 ${
+                  movieFullscreen ? "fixed inset-0 z-[1000] h-[100dvh] w-screen rounded-none p-3" : ""
+                }`}
+              >
+                <video
+                  ref={videoRef}
+                  src={moviePlaybackUrl ?? undefined}
+                  autoPlay
+                  playsInline
+                  onPlay={() => setMovieIsPlaying(true)}
+                  onPause={() => setMovieIsPlaying(false)}
+                  onTimeUpdate={(event) => setMovieCurrentTime(event.currentTarget.currentTime)}
+                  onLoadedMetadata={(event) => {
+                    setMovieDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0);
+                    event.currentTarget.playbackRate = movieSpeed;
+                  }}
+                  onError={() => {
+                    setMovieIsPlaying(false);
+                    console.error("The selected movie could not be decoded by this device. MP4 with H.264 video and AAC audio has the broadest support.");
+                    window.alert("This video format or codec is not supported by this device. Try an MP4 with H.264 video and AAC audio.");
+                  }}
+                  className="min-h-0 w-full flex-1 object-contain"
+                >
+                  {subtitleUrl && <track key={subtitleUrl} kind="subtitles" srcLang="en" label="Subtitles" src={subtitleUrl} default />}
+                </video>
+                <div className="w-full max-w-2xl shrink-0 flex flex-col gap-1 text-[10px] font-semibold">
+                  <input
+                    type="range"
+                    min={0}
+                    max={movieDuration || 0}
+                    step={0.1}
+                    value={Math.min(movieCurrentTime, movieDuration || 0)}
+                    onChange={(event) => {
+                      const next = Number(event.target.value);
+                      if (videoRef.current) videoRef.current.currentTime = next;
+                      setMovieCurrentTime(next);
+                    }}
+                    aria-label="Movie progress"
+                    className="w-full accent-white touch-auto"
+                  />
+                  <div className="flex items-center justify-between">
+                    <span>{formatTime(movieCurrentTime)} / {formatTime(movieDuration)}</span>
+                    <span>{movieSpeed}x</span>
+                  </div>
+                  <div className="flex items-center justify-between gap-2">
+                    <button type="button" onClick={() => skipMovie(-10)} aria-label="Back 10 seconds" className="p-2"><Rewind size={17} /></button>
+                    <button type="button" onClick={toggleMoviePlayback} aria-label={movieIsPlaying ? "Pause movie" : "Play movie"} className="p-2">
+                      {movieIsPlaying ? <Pause size={20} /> : <Play size={20} />}
+                    </button>
+                    <button type="button" onClick={() => skipMovie(10)} aria-label="Forward 10 seconds" className="p-2"><FastForward size={17} /></button>
+                    <button type="button" onClick={cycleMovieSpeed} aria-label="Change movie speed" className="flex items-center gap-1 p-2">
+                      <Settings2 size={15} /> {movieSpeed}x
+                    </button>
+                    <button type="button" onClick={() => subtitleInputRef.current?.click()} aria-label="Load subtitles" className={`p-2 ${isSubtitleFileSelected ? "text-emerald-300" : ""}`}>
+                      <Subtitles size={17} />
+                    </button>
+                    {subtitleUrl && (
+                      <button type="button" onClick={() => setSubtitleUrl(null)} aria-label="Remove subtitles" className="p-2"><X size={15} /></button>
+                    )}
+                    <button type="button" onClick={toggleMovieFullscreen} aria-label={movieFullscreen ? "Exit fullscreen" : "Enter fullscreen"} className="ml-auto p-2">
+                      {movieFullscreen ? <Minimize size={17} /> : <Maximize size={17} />}
+                    </button>
+                  </div>
+                </div>
               </div>
             ) : screen === "eq" ? (
               <div className="flex-1 flex flex-col items-center justify-center relative z-10 w-full px-2">
@@ -1834,7 +2275,12 @@ export default function MobileBulletproofPlayer() {
               </div>
             ) : (
               <div className="flex-1 flex flex-col items-center justify-center relative z-10 overflow-hidden">
-                <div className="relative w-full flex items-center justify-center h-24 mb-2">
+                <div
+                  className="relative w-full flex items-center justify-center h-24 mb-2 touch-pan-y"
+                  onPointerDown={handleCoverSwipeStart}
+                  onPointerUp={handleCoverSwipeEnd}
+                  onPointerCancel={() => { coverSwipeStartXRef.current = null; }}
+                >
                   <AlbumCoverflow
                     items={coverflowItems}
                     activeIndex={coverflowActiveIndex}
@@ -2036,11 +2482,11 @@ export default function MobileBulletproofPlayer() {
             {unifiedIsPlaying ? <Pause size={18}/> : <Play size={18} className="inline"/>}
           </button>
 
-          <button onClick={handlePrevSong} className="absolute left-[7%] text-gray-600 hover:text-white cursor-pointer pointer-events-auto z-20 p-3">
-            <SkipBack size={18}/>
+          <button onClick={() => screen === "moviePlaying" ? skipMovie(-10) : handlePrevSong()} aria-label={screen === "moviePlaying" ? "Back 10 seconds" : "Previous song"} className="absolute left-[7%] text-gray-600 hover:text-white cursor-pointer pointer-events-auto z-20 p-3">
+            {screen === "moviePlaying" ? <Rewind size={18}/> : <SkipBack size={18}/>}
           </button>
-          <button onClick={handleNextSong} className="absolute right-[7%] text-gray-600 hover:text-white cursor-pointer pointer-events-auto z-20 p-3">
-            <SkipForward size={18}/>
+          <button onClick={() => screen === "moviePlaying" ? skipMovie(10) : handleNextSong()} aria-label={screen === "moviePlaying" ? "Forward 10 seconds" : "Next song"} className="absolute right-[7%] text-gray-600 hover:text-white cursor-pointer pointer-events-auto z-20 p-3">
+            {screen === "moviePlaying" ? <FastForward size={18}/> : <SkipForward size={18}/>}
           </button>
         </div>
       </div>
