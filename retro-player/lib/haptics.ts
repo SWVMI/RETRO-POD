@@ -11,13 +11,13 @@ const getHapticsModule = () => {
 };
 
 let lastTickAt = 0;
-const TICK_MIN_INTERVAL_MS = 28;
+const TICK_MIN_INTERVAL_MS = 55;
 
 async function nativeHaptic(kind: HapticKind) {
   const { Haptics, ImpactStyle } = await getHapticsModule();
   switch (kind) {
     case "tick":
-      await Haptics.selectionChanged();
+      await Haptics.vibrate({ duration: 12 });
       break;
     case "select":
       await Haptics.impact({ style: ImpactStyle.Light });
@@ -33,7 +33,7 @@ async function nativeHaptic(kind: HapticKind) {
 
 function webVibrateFallback(kind: HapticKind) {
   if (typeof navigator === "undefined" || !("vibrate" in navigator)) return;
-  const pattern = kind === "tick" ? 6 : kind === "select" ? 12 : kind === "confirm" ? 18 : [10, 40, 10];
+  const pattern = kind === "tick" ? 12 : kind === "select" ? 12 : kind === "confirm" ? 18 : [10, 40, 10];
   try {
     navigator.vibrate(pattern as number | number[]);
   } catch {

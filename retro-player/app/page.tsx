@@ -77,6 +77,9 @@ export default function MobileBulletproofPlayer() {
   const movieInputRef = useRef<HTMLInputElement>(null);
   const subtitleInputRef = useRef<HTMLInputElement>(null);
   const coverSwipeStartXRef = useRef<number | null>(null);
+  const movieControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activePlaylistIdRef = useRef<string | null>(null);
+  const playlistPlaybackOrderRef = useRef<string[]>([]);
   
   const [localSongs, setLocalSongs] = useState<SongItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -84,6 +87,9 @@ export default function MobileBulletproofPlayer() {
   const [favoriteSongNames, setFavoriteSongNames] = useState<string[]>([]);
   const [queuedSongNames, setQueuedSongNames] = useState<string[]>([]);
   const [playlists, setPlaylists] = useState<UserPlaylist[]>([]);
+  const [activePlaylistId, setActivePlaylistId] = useState<string | null>(null);
+  const [playlistPlaybackOrder, setPlaylistPlaybackOrder] = useState<string[]>([]);
+  const [playlistShuffleSelection, setPlaylistShuffleSelection] = useState<Record<string, boolean>>({});
   const [movies, setMovies] = useState<MovieItem[]>([]);
   const [libraryPreferencesLoaded, setLibraryPreferencesLoaded] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
@@ -100,6 +106,7 @@ export default function MobileBulletproofPlayer() {
   const [movieSpeed, setMovieSpeed] = useState(1);
   const [subtitleUrl, setSubtitleUrl] = useState<string | null>(null);
   const [movieFullscreen, setMovieFullscreen] = useState(false);
+  const [movieControlsVisible, setMovieControlsVisible] = useState(true);
 
   const [menuStack, setMenuStack] = useState<string[]>(["root"]);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -129,6 +136,10 @@ export default function MobileBulletproofPlayer() {
   useEffect(() => { repeatModeRef.current = repeatMode; }, [repeatMode]);
   useEffect(() => { shuffleOnRef.current = shuffleOn; }, [shuffleOn]);
   useEffect(() => { localSongsRef.current = localSongs; }, [localSongs]);
+  useEffect(() => {
+    activePlaylistIdRef.current = activePlaylistId;
+    playlistPlaybackOrderRef.current = playlistPlaybackOrder;
+  }, [activePlaylistId, playlistPlaybackOrder]);
   useEffect(() => { queuedSongNamesRef.current = queuedSongNames; }, [queuedSongNames]);
   useEffect(() => { currentIndexRef.current = currentIndex; }, [currentIndex]);
   useEffect(() => { isPlayingRef.current = isPlaying; }, [isPlaying]);
@@ -393,6 +404,7 @@ export default function MobileBulletproofPlayer() {
         const foundIdx = loadedSongs.findIndex(s => s.name === lastSongName);
         if (foundIdx !== -1) {
           setCurrentSong(loadedSongs[foundIdx]);
+          currentIndexRef.current = foundIdx;
           setCurrentIndex(foundIdx);
           if (audioRef.current) {
             setAudioSource(loadedSongs[foundIdx].file);
@@ -489,23 +501,53 @@ export default function MobileBulletproofPlayer() {
       releaseAudioSource();
       setIsPlaying(false);
       setCurrentSong(null);
+      activePlaylistIdRef.current = null;
+      playlistPlaybackOrderRef.current = [];
+      setActivePlaylistId(null);
+      setPlaylistPlaybackOrder([]);
+      setCurrentIndex(0);
       setScreen("menu");
     } else if (currentSong) {
       const nextIndex = localSongs
         .filter((song) => song.file.name !== fileName)
         .findIndex((song) => song.file.name === currentSong.file.name);
       if (nextIndex >= 0) setCurrentIndex(nextIndex);
+      if (activePlaylistIdRef.current) {
+        const nextOrder = playlistPlaybackOrderRef.current.filter((name) => name !== fileName);
+        playlistPlaybackOrderRef.current = nextOrder;
+        setPlaylistPlaybackOrder(nextOrder);
+        const playlistIndex = nextOrder.indexOf(currentSong.file.name);
+        if (playlistIndex >= 0) {
+          currentIndexRef.current = playlistIndex;
+          setCurrentIndex(playlistIndex);
+        }
+      }
     }
   };
 
-  const playSong = (song: SongItem, index: number) => {
+  const getPlaybackSongs = () => {
+    const activePlaylistId = activePlaylistIdRef.current;
+    if (!activePlaylistId) return localSongsRef.current;
+    const playlist = playlists.find((item) => item.id === activePlaylistId);
+    if (!playlist) return localSongsRef.current;
+    const orderedNames = playlistPlaybackOrderRef.current.filter((name) => playlist.songNames.includes(name));
+    const names = orderedNames.length > 0 ? orderedNames : playlist.songNames;
+    return names
+      .map((name) => localSongsRef.current.find((song) => song.file.name === name))
+      .filter((song): song is SongItem => song !== undefined);
+  };
+
+  const playSong = (song: SongItem, index: number, playlistId: string | null = null) => {
     if (sourceNodeRef.current || eqGainsRef.current.some((gain) => gain !== 0)) {
       ensureAudioGraph();
       wakeUpAudioCtx();
     }
 
     const audio = audioRef.current;
+    activePlaylistIdRef.current = playlistId;
+    setActivePlaylistId(playlistId);
     setCurrentSong(song);
+    currentIndexRef.current = index;
     setCurrentIndex(index);
     setScreen("nowPlaying");
     const requestId = ++playbackRequestRef.current;
@@ -578,6 +620,35 @@ export default function MobileBulletproofPlayer() {
         ? { ...playlist, songNames: playlist.songNames.filter((name) => name !== fileName) }
         : playlist
     )));
+    if (activePlaylistIdRef.current === playlistId) {
+      const nextOrder = playlistPlaybackOrderRef.current.filter((name) => name !== fileName);
+      playlistPlaybackOrderRef.current = nextOrder;
+      setPlaylistPlaybackOrder(nextOrder);
+      if (currentSong?.file.name === fileName) {
+        const nextSongs = nextOrder
+          .map((name) => localSongsRef.current.find((song) => song.file.name === name))
+          .filter((song): song is SongItem => song !== undefined);
+        const nextIndex = Math.min(currentIndexRef.current, nextSongs.length - 1);
+        if (nextIndex >= 0) {
+          playSong(nextSongs[nextIndex], nextIndex, playlistId);
+        } else {
+          releaseAudioSource();
+          activePlaylistIdRef.current = null;
+          playlistPlaybackOrderRef.current = [];
+          setActivePlaylistId(null);
+          setPlaylistPlaybackOrder([]);
+          setCurrentSong(null);
+          setCurrentIndex(0);
+          setIsPlaying(false);
+        }
+      } else if (currentSong) {
+        const nextIndex = nextOrder.indexOf(currentSong.file.name);
+        if (nextIndex >= 0) {
+          currentIndexRef.current = nextIndex;
+          setCurrentIndex(nextIndex);
+        }
+      }
+    }
     triggerHaptic("select", hapticsOn);
   };
 
@@ -654,7 +725,54 @@ export default function MobileBulletproofPlayer() {
     return true;
   };
 
+  const playPlaylist = (playlistId: string) => {
+    const playlist = playlists.find((item) => item.id === playlistId);
+    if (!playlist) return;
+    const names = [...playlist.songNames];
+    if (names.length === 0) {
+      window.alert("Add songs to this playlist before playing it.");
+      return;
+    }
+    if (playlistShuffleSelection[playlistId]) {
+      for (let index = names.length - 1; index > 0; index -= 1) {
+        const swapIndex = Math.floor(Math.random() * (index + 1));
+        [names[index], names[swapIndex]] = [names[swapIndex], names[index]];
+      }
+    }
+    const playlistSongs = names
+      .map((name) => localSongsRef.current.find((song) => song.file.name === name))
+      .filter((song): song is SongItem => song !== undefined);
+    if (playlistSongs.length === 0) return;
+    activePlaylistIdRef.current = playlistId;
+    playlistPlaybackOrderRef.current = names;
+    setActivePlaylistId(playlistId);
+    setPlaylistPlaybackOrder(names);
+    shufflePlayedSongNamesRef.current.clear();
+    playSong(playlistSongs[0], 0, playlistId);
+  };
+
+  const playPlaylistSong = (song: SongItem, playlistId: string) => {
+    const playlist = playlists.find((item) => item.id === playlistId);
+    if (!playlist) return;
+    const names = [...playlist.songNames];
+    const songIndex = names.indexOf(song.file.name);
+    if (songIndex < 0) return;
+    activePlaylistIdRef.current = playlistId;
+    playlistPlaybackOrderRef.current = names;
+    setActivePlaylistId(playlistId);
+    setPlaylistPlaybackOrder(names);
+    shufflePlayedSongNamesRef.current.clear();
+    playSong(song, songIndex, playlistId);
+  };
+
   const handleNextSong = () => {
+    const playbackSongs = getPlaybackSongs();
+    if (activePlaylistIdRef.current) {
+      if (playbackSongs.length === 0) return;
+      const nextIndex = (currentIndexRef.current + 1) % playbackSongs.length;
+      playSong(playbackSongs[nextIndex], nextIndex, activePlaylistIdRef.current);
+      return;
+    }
     if (playNextQueuedSong()) return;
     if (localSongs.length === 0) return;
     const nextIdx = shuffleOnRef.current ? pickRandomIndex(localSongs.length, currentIndex) : (currentIndex + 1) % localSongs.length;
@@ -662,9 +780,10 @@ export default function MobileBulletproofPlayer() {
   };
 
   const handlePrevSong = () => {
-    if (localSongs.length === 0) return;
-    const prevIdx = (currentIndex - 1 + localSongs.length) % localSongs.length;
-    playSong(localSongs[prevIdx], prevIdx);
+    const playbackSongs = getPlaybackSongs();
+    if (playbackSongs.length === 0) return;
+    const prevIdx = (currentIndexRef.current - 1 + playbackSongs.length) % playbackSongs.length;
+    playSong(playbackSongs[prevIdx], prevIdx, activePlaylistIdRef.current);
   };
 
   const handleTrackEnded = () => {
@@ -681,14 +800,15 @@ export default function MobileBulletproofPlayer() {
       return;
     }
 
-    if (localSongsRef.current.length === 0) return;
+    const playbackSongs = getPlaybackSongs();
+    if (playbackSongs.length === 0) return;
 
-    if (playNextQueuedSong()) return;
+    if (!activePlaylistIdRef.current && playNextQueuedSong()) return;
 
-    if (shuffleOnRef.current) {
-      const currentName = localSongsRef.current[currentIndexRef.current]?.file.name;
+    if (shuffleOnRef.current && !activePlaylistIdRef.current) {
+      const currentName = playbackSongs[currentIndexRef.current]?.file.name;
       if (currentName) shufflePlayedSongNamesRef.current.add(currentName);
-      const unplayed = localSongsRef.current
+      const unplayed = playbackSongs
         .map((song, index) => ({ song, index }))
         .filter(({ song }) => !shufflePlayedSongNamesRef.current.has(song.file.name));
       if (unplayed.length === 0 && repeatModeRef.current === "off") {
@@ -697,31 +817,31 @@ export default function MobileBulletproofPlayer() {
       }
       if (unplayed.length === 0) {
         shufflePlayedSongNamesRef.current.clear();
-        const currentName = localSongsRef.current[currentIndexRef.current]?.file.name;
+        const currentName = playbackSongs[currentIndexRef.current]?.file.name;
         if (currentName) shufflePlayedSongNamesRef.current.add(currentName);
-        unplayed.push(...localSongsRef.current
+        unplayed.push(...playbackSongs
           .map((song, index) => ({ song, index }))
           .filter(({ song }) => song.file.name !== currentName));
         if (unplayed.length === 0) {
-          const currentSong = localSongsRef.current[currentIndexRef.current];
-          if (currentSong) playSong(currentSong, currentIndexRef.current);
+          const currentSong = playbackSongs[currentIndexRef.current];
+          if (currentSong) playSong(currentSong, currentIndexRef.current, activePlaylistIdRef.current);
           return;
         }
       }
       const chosen = unplayed[Math.floor(Math.random() * unplayed.length)];
       const nextIdx = chosen.index;
-      playSong(localSongsRef.current[nextIdx], nextIdx);
+      playSong(playbackSongs[nextIdx], nextIdx, activePlaylistIdRef.current);
       return;
     }
 
-    const isLast = currentIndexRef.current === localSongsRef.current.length - 1;
+    const isLast = currentIndexRef.current === playbackSongs.length - 1;
     if (isLast && repeatModeRef.current === "off") {
       setIsPlaying(false);
       return;
     }
 
-    const nextIdx = (currentIndexRef.current + 1) % localSongsRef.current.length;
-    playSong(localSongsRef.current[nextIdx], nextIdx);
+    const nextIdx = (currentIndexRef.current + 1) % playbackSongs.length;
+    playSong(playbackSongs[nextIdx], nextIdx, activePlaylistIdRef.current);
   };
 
   const latestNextSong = useRef(handleNextSong);
@@ -995,6 +1115,8 @@ export default function MobileBulletproofPlayer() {
       const isFullscreen = document.fullscreenElement === movieStageRef.current;
       setMovieFullscreen(isFullscreen);
       if (!isFullscreen) {
+        setMovieControlsVisible(true);
+        if (movieControlsTimerRef.current) clearTimeout(movieControlsTimerRef.current);
         try {
           const orientation = window.screen.orientation as ScreenOrientation & { unlock?: () => void };
           orientation.unlock?.();
@@ -1020,6 +1142,19 @@ export default function MobileBulletproofPlayer() {
   }, [movieIsPlaying, screen, moviePlaybackUrl]);
 
   useEffect(() => {
+    if (!movieFullscreen || !movieIsPlaying || !movieControlsVisible) return;
+    if (movieControlsTimerRef.current) clearTimeout(movieControlsTimerRef.current);
+    movieControlsTimerRef.current = setTimeout(() => setMovieControlsVisible(false), 2600);
+    return () => {
+      if (movieControlsTimerRef.current) clearTimeout(movieControlsTimerRef.current);
+    };
+  }, [movieFullscreen, movieIsPlaying, movieControlsVisible]);
+
+  useEffect(() => () => {
+    if (movieControlsTimerRef.current) clearTimeout(movieControlsTimerRef.current);
+  }, []);
+
+  useEffect(() => {
     isPlayingRef.current = isPlaying;
     if ("mediaSession" in navigator) {
       navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
@@ -1039,14 +1174,18 @@ export default function MobileBulletproofPlayer() {
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
 
-    if (!currentSong) {
+    const clearMediaSession = () => {
       navigator.mediaSession.metadata = null;
       navigator.mediaSession.setActionHandler("play", null);
       navigator.mediaSession.setActionHandler("pause", null);
       navigator.mediaSession.setActionHandler("previoustrack", null);
       navigator.mediaSession.setActionHandler("nexttrack", null);
       navigator.mediaSession.setActionHandler("seekto", null);
-      return;
+    };
+
+    if (!currentSong || screen === "moviePlaying") {
+      clearMediaSession();
+      return clearMediaSession;
     }
 
     navigator.mediaSession.metadata = new MediaMetadata({
@@ -1066,7 +1205,8 @@ export default function MobileBulletproofPlayer() {
       if (!audioRef.current || details.seekTime === undefined) return;
       audioRef.current.currentTime = Math.max(0, Math.min(details.seekTime, audioRef.current.duration || details.seekTime));
     });
-  }, [currentSong, localSongs, currentIndex]);
+    return clearMediaSession;
+  }, [currentSong, localSongs, currentIndex, screen]);
 
   // --- MENUS & UI LOGIC ---
   const menus = useMemo((): Record<string, Menu> => {
@@ -1443,6 +1583,10 @@ export default function MobileBulletproofPlayer() {
     }
 
     if (selectedItem.type === "song" && selectedItem.song) {
+      if (selectedItem.playlistId) {
+        playPlaylistSong(selectedItem.song, selectedItem.playlistId);
+        return;
+      }
       if (currentSong?.file === selectedItem.song.file) {
         setScreen("nowPlaying");
       } else {
@@ -1468,6 +1612,16 @@ export default function MobileBulletproofPlayer() {
       const playlistId = selectedItem.actionId.slice("delete_playlist:".length);
       const playlist = playlists.find((item) => item.id === playlistId);
       if (playlist && window.confirm(`Delete playlist "${playlist.name}"?`)) {
+        if (activePlaylistIdRef.current === playlistId) {
+          releaseAudioSource();
+          activePlaylistIdRef.current = null;
+          playlistPlaybackOrderRef.current = [];
+          setActivePlaylistId(null);
+          setPlaylistPlaybackOrder([]);
+          setCurrentSong(null);
+          setCurrentIndex(0);
+          setIsPlaying(false);
+        }
         setPlaylists((previous) => previous.filter((item) => item.id !== playlistId));
         setMenuStack((previous) => previous.slice(0, -2));
         setSelectedIndex(0);
@@ -1612,7 +1766,7 @@ export default function MobileBulletproofPlayer() {
       return;
     }
 
-    activateMenuItem(currentMenu.items[selectedIndex]);
+    activateMenuItem(visibleMenuItems[selectedIndex]);
   };
 
   const handleGlobalPlayPause = (e: React.MouseEvent | React.TouchEvent) => {
@@ -1647,6 +1801,11 @@ export default function MobileBulletproofPlayer() {
   const handleMenuClick = (e: React.MouseEvent | React.TouchEvent) => {
     e.stopPropagation(); 
     if (screen === "moviePlaying") {
+      if (document.fullscreenElement === movieStageRef.current) {
+        void document.exitFullscreen().catch((error) => {
+          console.warn("Unable to exit movie fullscreen:", error);
+        });
+      }
       videoRef.current?.pause();
       setMovieIsPlaying(false);
       setScreen("movies");
@@ -1764,6 +1923,14 @@ export default function MobileBulletproofPlayer() {
     triggerHaptic("select", hapticsOn);
   };
 
+  const revealMovieControls = () => {
+    setMovieControlsVisible(true);
+    if (movieControlsTimerRef.current) clearTimeout(movieControlsTimerRef.current);
+    if (movieFullscreen && movieIsPlaying) {
+      movieControlsTimerRef.current = setTimeout(() => setMovieControlsVisible(false), 2600);
+    }
+  };
+
   const toggleMovieFullscreen = async () => {
     const stage = movieStageRef.current;
     if (!stage) return;
@@ -1774,6 +1941,7 @@ export default function MobileBulletproofPlayer() {
       }
       await stage.requestFullscreen();
       setMovieFullscreen(true);
+      setMovieControlsVisible(true);
       try {
         const orientation = window.screen.orientation as ScreenOrientation & {
           lock?: (value: "landscape") => Promise<void>;
@@ -1858,8 +2026,16 @@ export default function MobileBulletproofPlayer() {
     ? (unifiedCurrentTime / unifiedDuration) * 100
     : 0;
 
-  const coverflowItems: CoverflowItem[] = localSongs.map((song) => ({
-    id: song.name,
+  const activePlaylist = activePlaylistId
+    ? playlists.find((playlist) => playlist.id === activePlaylistId) ?? null
+    : null;
+  const activePlaybackSongs = activePlaylist
+    ? (playlistPlaybackOrder.length > 0 ? playlistPlaybackOrder : activePlaylist.songNames)
+        .map((name) => localSongs.find((song) => song.file.name === name))
+        .filter((song): song is SongItem => song !== undefined)
+    : localSongs;
+  const activeCoverflowItems: CoverflowItem[] = activePlaybackSongs.map((song) => ({
+    id: song.file.name,
     name: song.name,
     artworkUrl: song.artworkUrl,
   }));
@@ -1871,7 +2047,7 @@ export default function MobileBulletproofPlayer() {
     : undefined;
 
   return (
-<div className="fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 p-3 pt-[max(1.5rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]">      {/* --- Secret Developer Diagnostics HUD --- */}
+<div className="fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 p-3 pt-[max(3rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]">      {/* --- Secret Developer Diagnostics HUD --- */}
       {showDiag && (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-black/90 border border-green-500 text-green-400 text-[10px] p-3 rounded-lg z-[100] font-mono shadow-[0_0_20px_rgba(0,255,0,0.2)] w-3/4 max-w-xs">
           <p className="font-bold border-b border-green-500/50 pb-1 mb-2 text-center uppercase tracking-widest">Diagnostics</p>
@@ -2013,6 +2189,39 @@ export default function MobileBulletproofPlayer() {
                     )}
                   </label>
                 )}
+                {currentMenuId.startsWith("playlist_") &&
+                  !currentMenuId.startsWith("playlist_options_") &&
+                  !currentMenuId.startsWith("playlist_add_") && (
+                    <div className="mb-2 flex items-center gap-2 rounded-xl border border-white/10 bg-black/30 p-2 shadow-lg backdrop-blur-md">
+                      <button
+                        type="button"
+                        onClick={() => playPlaylist(currentMenuId.slice("playlist_".length))}
+                        className="flex flex-1 items-center justify-center gap-2 rounded-lg bg-white px-4 py-2 text-sm font-extrabold uppercase tracking-wider text-black shadow-md transition-transform active:scale-[0.98]"
+                      >
+                        <Play size={16} fill="currentColor" /> Play
+                      </button>
+                      <button
+                        type="button"
+                        aria-label={playlistShuffleSelection[currentMenuId.slice("playlist_".length)] ? "Shuffle playlist enabled" : "Shuffle playlist disabled"}
+                        aria-pressed={Boolean(playlistShuffleSelection[currentMenuId.slice("playlist_".length)])}
+                        onClick={() => {
+                          const playlistId = currentMenuId.slice("playlist_".length);
+                          setPlaylistShuffleSelection((previous) => ({
+                            ...previous,
+                            [playlistId]: !previous[playlistId],
+                          }));
+                          triggerHaptic("select", hapticsOn);
+                        }}
+                        className={`flex h-10 w-11 items-center justify-center rounded-lg border border-white/15 transition-colors ${
+                          playlistShuffleSelection[currentMenuId.slice("playlist_".length)]
+                            ? "bg-emerald-300 text-black"
+                            : "bg-white/5 text-white"
+                        }`}
+                      >
+                        <Shuffle size={18} />
+                      </button>
+                    </div>
+                  )}
                 <ul className="space-y-1">
                   {visibleMenuItems.map((item, index) => (
                     <li 
@@ -2124,18 +2333,29 @@ export default function MobileBulletproofPlayer() {
                 >
                   <Film size={16} /> Import Movies
                 </button>
-                <p className="px-1 text-[9px] opacity-70">MP4 with H.264 video and AAC audio works on the widest range of devices.</p>
+                <p className="px-1 text-[9px] opacity-70">MP4 (H.264/AAC) is most compatible. 4K playback depends on your device&apos;s video decoder and storage speed.</p>
                 <div className="min-h-0 flex-1 overflow-y-auto no-scrollbar">
+                  {movies.length > 0 && (
+                    <div className="mb-2 rounded-xl border border-white/10 bg-gradient-to-r from-white/10 to-transparent p-3">
+                      <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.16em]">
+                        <Film size={15} /> Offline Cinema
+                      </div>
+                      <p className="mt-1 text-[10px] opacity-70">{movies.length} {movies.length === 1 ? "movie" : "movies"} stored on this device</p>
+                    </div>
+                  )}
                   {visibleMovies.map((movie, index) => (
                     <div
                       key={movie.file.name}
-                      className={`flex items-center gap-2 px-3 py-2 rounded text-sm font-bold ${
+                      className={`mb-1 flex items-center gap-2 rounded-xl border border-white/5 bg-gradient-to-r from-white/[0.07] to-transparent px-3 py-2 text-sm font-bold shadow-sm ${
                         selectedIndex === index ? `${theme.selectedBg} ${theme.selectedText}` : ""
                       }`}
                     >
                       <button type="button" onClick={() => playMovie(movie)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
-                        <Film size={15} className="shrink-0" />
-                        <span className="truncate">{movie.name}</span>
+                        <span className="flex h-9 w-12 shrink-0 items-center justify-center rounded-md bg-black/30"><Film size={17} /></span>
+                        <span className="min-w-0">
+                          <span className="block truncate">{movie.name}</span>
+                          <span className="block text-[9px] font-medium opacity-60">Offline video</span>
+                        </span>
                       </button>
                       <button type="button" aria-label={`Delete ${movie.name}`} onClick={() => deleteMovie(movie)} className="p-1">
                         <X size={14} />
@@ -2155,6 +2375,12 @@ export default function MobileBulletproofPlayer() {
                 className={`flex-1 min-h-0 flex flex-col items-center justify-center gap-2 relative z-10 bg-black/90 rounded-lg p-2 ${
                   movieFullscreen ? "fixed inset-0 z-[1000] h-[100dvh] w-screen rounded-none p-3" : ""
                 }`}
+                onPointerMove={() => {
+                  if (movieFullscreen) revealMovieControls();
+                }}
+                onPointerDown={() => {
+                  if (movieFullscreen) revealMovieControls();
+                }}
               >
                 <video
                   ref={videoRef}
@@ -2173,11 +2399,20 @@ export default function MobileBulletproofPlayer() {
                     console.error("The selected movie could not be decoded by this device. MP4 with H.264 video and AAC audio has the broadest support.");
                     window.alert("This video format or codec is not supported by this device. Try an MP4 with H.264 video and AAC audio.");
                   }}
+                  onClick={() => {
+                    if (movieFullscreen && !movieControlsVisible) revealMovieControls();
+                  }}
                   className="min-h-0 w-full flex-1 object-contain"
                 >
                   {subtitleUrl && <track key={subtitleUrl} kind="subtitles" srcLang="en" label="Subtitles" src={subtitleUrl} default />}
                 </video>
-                <div className="w-full max-w-2xl shrink-0 flex flex-col gap-1 text-[10px] font-semibold">
+                <div className={`w-full max-w-2xl shrink-0 flex flex-col gap-1 rounded-xl text-[10px] font-semibold transition-opacity duration-200 ${
+                  movieFullscreen
+                    ? `absolute inset-x-0 bottom-0 max-w-none bg-gradient-to-t from-black via-black/90 to-transparent px-4 pb-[max(1rem,env(safe-area-inset-bottom))] pt-10 ${
+                        movieControlsVisible ? "opacity-100" : "pointer-events-none opacity-0"
+                      }`
+                    : "px-1 pb-1"
+                }`}>
                   <input
                     type="range"
                     min={0}
@@ -2282,7 +2517,7 @@ export default function MobileBulletproofPlayer() {
                   onPointerCancel={() => { coverSwipeStartXRef.current = null; }}
                 >
                   <AlbumCoverflow
-                    items={coverflowItems}
+                    items={activeCoverflowItems}
                     activeIndex={coverflowActiveIndex}
                     isPlaying={unifiedIsPlaying}
                   />
