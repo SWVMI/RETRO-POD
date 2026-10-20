@@ -2,8 +2,10 @@
 
 import { useState, useRef, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
+import { Capacitor } from "@capacitor/core";
 import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal, Heart, ListPlus, X, Shuffle, Repeat, Repeat1, Search, Maximize, Minimize, Film, Subtitles, Settings2, Rewind, FastForward } from "lucide-react";
 import { triggerHaptic } from "@/lib/haptics";
+import { AndroidPlayback } from "@/lib/androidPlayback";
 import AlbumCoverflow, { CoverflowItem } from "@/components/AlbumCoverflow";
 
 const formatTime = (seconds: number) => {
@@ -111,6 +113,8 @@ export default function MobileBulletproofPlayer() {
   const [menuStack, setMenuStack] = useState<string[]>(["root"]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [screen, setScreen] = useState<"menu" | "nowPlaying" | "eq" | "movies" | "moviePlaying">("menu");
+  const selectedMenuItemRef = useRef<HTMLLIElement | null>(null);
+  const selectedMovieItemRef = useRef<HTMLDivElement | null>(null);
 
   const padRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -1172,6 +1176,36 @@ export default function MobileBulletproofPlayer() {
   }, [isPlaying]);
 
   useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return;
+    const active = Boolean(currentSong && isPlaying && screen !== "moviePlaying");
+    AndroidPlayback.setPlaybackActive({ active }).catch((error) => {
+      console.error("Unable to update Android background playback service:", error);
+    });
+  }, [currentSong, isPlaying, screen]);
+
+  useEffect(() => {
+    const orientation = screen === "moviePlaying" && movieFullscreen ? "landscape" : "portrait";
+    if (Capacitor.isNativePlatform()) {
+      AndroidPlayback.setOrientation({ orientation }).catch((error) => {
+        console.error(`Unable to lock Android orientation to ${orientation}:`, error);
+      });
+      return;
+    }
+
+    const screenOrientation = window.screen.orientation as ScreenOrientation & {
+      lock?: (value: "landscape" | "portrait") => Promise<void>;
+      unlock?: () => void;
+    };
+    if (orientation === "landscape") {
+      screenOrientation.lock?.("landscape").catch((error) => {
+        console.warn("Landscape orientation lock is unavailable on this device:", error);
+      });
+    } else {
+      screenOrientation.unlock?.();
+    }
+  }, [screen, movieFullscreen]);
+
+  useEffect(() => {
     if (!("mediaSession" in navigator)) return;
 
     const clearMediaSession = () => {
@@ -1450,21 +1484,34 @@ export default function MobileBulletproofPlayer() {
   }, [currentMenuId]);
 
   useEffect(() => {
+    if (screen !== "menu") return;
     if (selectedIndex >= visibleMenuItems.length && visibleMenuItems.length > 0) {
       setSelectedIndex(visibleMenuItems.length - 1);
     } else if (visibleMenuItems.length === 0 && selectedIndex !== 0) {
       setSelectedIndex(0);
     }
-  }, [selectedIndex, visibleMenuItems.length]);
+  }, [selectedIndex, screen, visibleMenuItems.length]);
 
   useEffect(() => {
-    if (screen === "menu") {
-      const activeElement = document.getElementById(`menu-item-${selectedIndex}`);
-      if (activeElement) {
-        activeElement.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      }
-    }
+    if (screen === "menu") selectedMenuItemRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }, [selectedIndex, screen, currentMenuId]);
+
+  useEffect(() => {
+    if (screen === "movies") setSelectedIndex(0);
+  }, [screen]);
+
+  useEffect(() => {
+    if (screen !== "movies") return;
+    if (selectedIndex >= visibleMovies.length && visibleMovies.length > 0) {
+      setSelectedIndex(visibleMovies.length - 1);
+    } else if (visibleMovies.length === 0 && selectedIndex !== 0) {
+      setSelectedIndex(0);
+    }
+  }, [selectedIndex, screen, visibleMovies.length]);
+
+  useEffect(() => {
+    if (screen === "movies") selectedMovieItemRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [selectedIndex, screen, visibleMovies.length]);
 
   const calculateDragData = (clientX: number, clientY: number) => {
     if (!padRef.current) return { angle: 0, distancePercent: 0 };
@@ -1942,14 +1989,6 @@ export default function MobileBulletproofPlayer() {
       await stage.requestFullscreen();
       setMovieFullscreen(true);
       setMovieControlsVisible(true);
-      try {
-        const orientation = window.screen.orientation as ScreenOrientation & {
-          lock?: (value: "landscape") => Promise<void>;
-        };
-        if (orientation.lock) await orientation.lock("landscape");
-      } catch (error) {
-        console.warn("Landscape orientation lock is unavailable on this device:", error);
-      }
     } catch (error) {
       console.error("Unable to enter movie fullscreen:", error);
       window.alert("Fullscreen playback is not supported by this device.");
@@ -2160,9 +2199,9 @@ export default function MobileBulletproofPlayer() {
             </div>
             
             {screen === "menu" ? (
-              <div className="flex-1 overflow-y-auto flex flex-col justify-start pt-1 no-scrollbar relative z-10">
+              <div className="flex-1 min-h-0 flex flex-col justify-start pt-1 no-scrollbar relative z-10">
                 {isSearchableMenu && (
-                  <label className={`sticky top-0 z-20 flex items-center gap-2 px-3 py-2 mb-2 rounded border ${theme.border}/50 bg-black/20 backdrop-blur touch-auto`}>
+                  <label className={`shrink-0 z-20 flex items-center gap-2 px-3 py-2 mb-2 rounded border ${theme.border}/50 bg-black/20 backdrop-blur touch-auto`}>
                     <Search size={15} className="shrink-0 opacity-70" />
                     <input
                       type="search"
@@ -2222,11 +2261,11 @@ export default function MobileBulletproofPlayer() {
                       </button>
                     </div>
                   )}
-                <ul className="space-y-1">
+                <ul className="min-h-0 flex-1 overflow-y-auto space-y-1 no-scrollbar">
                   {visibleMenuItems.map((item, index) => (
                     <li 
                       key={index}
-                      id={`menu-item-${index}`} 
+                      ref={selectedIndex === index ? selectedMenuItemRef : null}
                       onClick={() => activateMenuItem(item)}
                       className={`px-3 py-2.5 rounded transition-none text-sm md:text-base font-bold tracking-wide flex justify-between items-center cursor-pointer ${
                         selectedIndex === index ? `${theme.selectedBg} ${theme.selectedText}` : ""
@@ -2304,8 +2343,8 @@ export default function MobileBulletproofPlayer() {
                 )}
               </div>
             ) : screen === "movies" ? (
-              <div className="flex-1 min-h-0 overflow-y-auto flex flex-col gap-2 relative z-10">
-                <label className={`sticky top-0 z-20 flex items-center gap-2 px-3 py-2 rounded border ${theme.border}/50 bg-black/20 backdrop-blur touch-auto`}>
+              <div className="flex-1 min-h-0 overflow-hidden flex flex-col gap-2 relative z-10">
+                <label className={`shrink-0 z-20 flex items-center gap-2 px-3 py-2 rounded border ${theme.border}/50 bg-black/20 backdrop-blur touch-auto`}>
                   <Search size={15} className="shrink-0 opacity-70" />
                   <input
                     type="search"
@@ -2346,6 +2385,7 @@ export default function MobileBulletproofPlayer() {
                   {visibleMovies.map((movie, index) => (
                     <div
                       key={movie.file.name}
+                      ref={selectedIndex === index ? selectedMovieItemRef : null}
                       className={`mb-1 flex items-center gap-2 rounded-xl border border-white/5 bg-gradient-to-r from-white/[0.07] to-transparent px-3 py-2 text-sm font-bold shadow-sm ${
                         selectedIndex === index ? `${theme.selectedBg} ${theme.selectedText}` : ""
                       }`}
