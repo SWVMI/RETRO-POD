@@ -1,9 +1,10 @@
 "use client";
 
 import { useState, useRef, useEffect, useMemo } from "react";
+import Image from "next/image";
 import { motion, AnimatePresence } from "motion/react";
 import { Capacitor } from "@capacitor/core";
-import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal, Heart, ListPlus, X, Shuffle, Repeat, Repeat1, Search, Maximize, Minimize, Film, Subtitles, Settings2, Rewind, FastForward } from "lucide-react";
+import { Play, Pause, SkipForward, SkipBack, RefreshCw, Volume2, SlidersHorizontal, Heart, ListPlus, X, Shuffle, Repeat, Repeat1, Search, Maximize, Minimize, Film, Subtitles, Settings2, Rewind, FastForward, Music, Pencil, ArrowUp, ArrowDown, Radio } from "lucide-react";
 import { triggerHaptic } from "@/lib/haptics";
 import { AndroidPlayback } from "@/lib/androidPlayback";
 import AlbumCoverflow, { CoverflowItem } from "@/components/AlbumCoverflow";
@@ -15,7 +16,17 @@ const formatTime = (seconds: number) => {
   return `${m}:${s.toString().padStart(2, "0")}`;
 };
 
-type SongItem = { file: File; name: string; artworkUrl?: string };
+type SongItem = {
+  file: File;
+  name: string;
+  artworkUrl?: string;
+  artist?: string;
+  album?: string;
+  importedAt?: number;
+  playCount?: number;
+  lastPlayedAt?: number;
+  customArtworkData?: string;
+};
 const lcdThemes = [
   "burgundy", "graphite", "champagne", "rose-gold", "sage", "alpine",
   "ocean-depths", "aurora", "cobalt", "amethyst", "ember", "jade",
@@ -46,6 +57,23 @@ type MenuItem = {
 };
 type Menu = { id: string; title: string; items: MenuItem[] };
 
+const readRadioTasteProfile = (storageKey: string) => {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(storageKey) ?? "{}");
+    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+    const profile: Record<string, number> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (key.length <= 180 && typeof value === "number" && Number.isFinite(value)) {
+        profile[key] = Math.max(-5, Math.min(5, value));
+      }
+    }
+    return profile;
+  } catch (error) {
+    console.warn(`Unable to restore Retro Radio preferences from ${storageKey}:`, error);
+    return {};
+  }
+};
+
 export default function MobileBulletproofPlayer() {
   const [batteryLevel, setBatteryLevel] = useState<number | null>(null);
   const [isCharging, setIsCharging] = useState(false);
@@ -57,7 +85,21 @@ export default function MobileBulletproofPlayer() {
   const [hapticsOn, setHapticsOn] = useState(true);
   const [shuffleOn, setShuffleOn] = useState(false);
   const [repeatMode, setRepeatMode] = useState<"off" | "one" | "all">("all");
+  const [radioModeOn, setRadioModeOn] = useState(false);
+  const [radioDiscoveryMode, setRadioDiscoveryMode] = useState(false);
+  const [radioRecommendationReason, setRadioRecommendationReason] = useState("");
+  const [radioArtistTaste, setRadioArtistTaste] = useState<Record<string, number>>({});
+  const [radioAlbumTaste, setRadioAlbumTaste] = useState<Record<string, number>>({});
+  const [radioTokenTaste, setRadioTokenTaste] = useState<Record<string, number>>({});
   const [clock24h, setClock24h] = useState(true);
+  const [detailedViewEnabled, setDetailedViewEnabled] = useState(true);
+  const [artworkLcdBackgroundEnabled, setArtworkLcdBackgroundEnabled] = useState(false);
+  const [resumePlaybackEnabled, setResumePlaybackEnabled] = useState(true);
+  const [seekJumpSeconds, setSeekJumpSeconds] = useState(10);
+  const [sleepFadeEnabled, setSleepFadeEnabled] = useState(true);
+  const [largeTextEnabled, setLargeTextEnabled] = useState(false);
+  const [highContrastEnabled, setHighContrastEnabled] = useState(false);
+  const [reducedMotionEnabled, setReducedMotionEnabled] = useState(false);
   const [sleepTimerEndAt, setSleepTimerEndAt] = useState<number | null>(null);
 
   // PRO Features State
@@ -82,6 +124,15 @@ export default function MobileBulletproofPlayer() {
   const movieControlsTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activePlaylistIdRef = useRef<string | null>(null);
   const playlistPlaybackOrderRef = useRef<string[]>([]);
+  const radioModeOnRef = useRef(false);
+  const radioStationNamesRef = useRef<string[]>([]);
+  const radioPositionRef = useRef(0);
+  const radioSeedSongRef = useRef<SongItem | null>(null);
+  const radioSkippedNamesRef = useRef<Set<string>>(new Set());
+  const radioArtistTasteRef = useRef<Record<string, number>>({});
+  const radioAlbumTasteRef = useRef<Record<string, number>>({});
+  const radioTokenTasteRef = useRef<Record<string, number>>({});
+  const radioDiscoveryModeRef = useRef(false);
   
   const [localSongs, setLocalSongs] = useState<SongItem[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -94,6 +145,7 @@ export default function MobileBulletproofPlayer() {
   const [playlistShuffleSelection, setPlaylistShuffleSelection] = useState<Record<string, boolean>>({});
   const [movies, setMovies] = useState<MovieItem[]>([]);
   const [libraryPreferencesLoaded, setLibraryPreferencesLoaded] = useState(false);
+  const [songsLoaded, setSongsLoaded] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -109,10 +161,19 @@ export default function MobileBulletproofPlayer() {
   const [subtitleUrl, setSubtitleUrl] = useState<string | null>(null);
   const [movieFullscreen, setMovieFullscreen] = useState(false);
   const [movieControlsVisible, setMovieControlsVisible] = useState(true);
+  const [importProgress, setImportProgress] = useState<{ current: number; total: number; fileName: string } | null>(null);
+  const [importNotice, setImportNotice] = useState<string | null>(null);
+  const [editingSong, setEditingSong] = useState<SongItem | null>(null);
+  const [customArtworkData, setCustomArtworkData] = useState("");
+  const [queueUndo, setQueueUndo] = useState<{ fileName: string; index: number } | null>(null);
+  const customArtworkInputRef = useRef<HTMLInputElement>(null);
+  const sleepFadeStartVolumeRef = useRef<number | null>(null);
+  const queueUndoTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [menuStack, setMenuStack] = useState<string[]>(["root"]);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [screen, setScreen] = useState<"menu" | "nowPlaying" | "eq" | "movies" | "moviePlaying">("menu");
+  const [isDetailedNowPlaying, setIsDetailedNowPlaying] = useState(false);
   const selectedMenuItemRef = useRef<HTMLLIElement | null>(null);
   const selectedMovieItemRef = useRef<HTMLDivElement | null>(null);
 
@@ -127,6 +188,8 @@ export default function MobileBulletproofPlayer() {
   
   const clock24hRef = useRef(clock24h);
   const sleepTimerEndAtRef = useRef<number | null>(null);
+  const sleepFadeEnabledRef = useRef(sleepFadeEnabled);
+  const resumePlaybackEnabledRef = useRef(resumePlaybackEnabled);
   const repeatModeRef = useRef<"off" | "one" | "all">("all");
   const shuffleOnRef = useRef(false);
   const shufflePlayedSongNamesRef = useRef<Set<string>>(new Set());
@@ -137,6 +200,12 @@ export default function MobileBulletproofPlayer() {
 
   useEffect(() => { clock24hRef.current = clock24h; }, [clock24h]);
   useEffect(() => { sleepTimerEndAtRef.current = sleepTimerEndAt; }, [sleepTimerEndAt]);
+  useEffect(() => { sleepFadeEnabledRef.current = sleepFadeEnabled; }, [sleepFadeEnabled]);
+  useEffect(() => { resumePlaybackEnabledRef.current = resumePlaybackEnabled; }, [resumePlaybackEnabled]);
+  useEffect(() => { radioArtistTasteRef.current = radioArtistTaste; }, [radioArtistTaste]);
+  useEffect(() => { radioAlbumTasteRef.current = radioAlbumTaste; }, [radioAlbumTaste]);
+  useEffect(() => { radioTokenTasteRef.current = radioTokenTaste; }, [radioTokenTaste]);
+  useEffect(() => { radioDiscoveryModeRef.current = radioDiscoveryMode; }, [radioDiscoveryMode]);
   useEffect(() => { repeatModeRef.current = repeatMode; }, [repeatMode]);
   useEffect(() => { shuffleOnRef.current = shuffleOn; }, [shuffleOn]);
   useEffect(() => { localSongsRef.current = localSongs; }, [localSongs]);
@@ -385,15 +454,40 @@ export default function MobileBulletproofPlayer() {
     try {
       const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
       const loadedSongs: SongItem[] = [];
+      let savedMetadata: Record<string, Partial<SongItem>> = {};
+      try {
+        const storedMetadata = localStorage.getItem("retro_song_metadata");
+        if (storedMetadata) {
+          const parsed: unknown = JSON.parse(storedMetadata);
+          if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+            savedMetadata = parsed as Record<string, Partial<SongItem>>;
+          }
+        }
+      } catch (error) {
+        console.warn("Unable to restore song metadata:", error);
+      }
       for await (const [, handle] of root.entries()) {
         if (handle.kind === 'file') {
           const file = await handle.getFile();
-          const artworkUrl = await extractArtwork(file);
-          loadedSongs.push({ file, name: file.name.replace(/\.[^/.]+$/, ""), artworkUrl });
+          const metadata = savedMetadata[file.name];
+          const artworkUrl = metadata?.customArtworkData || await extractArtwork(file);
+          loadedSongs.push({
+            file,
+            name: typeof metadata?.name === "string" ? metadata.name : file.name.replace(/\.[^/.]+$/, ""),
+            artworkUrl,
+            artist: typeof metadata?.artist === "string" ? metadata.artist : "",
+            album: typeof metadata?.album === "string" ? metadata.album : "",
+            importedAt: typeof metadata?.importedAt === "number" ? metadata.importedAt : file.lastModified,
+            playCount: typeof metadata?.playCount === "number" ? metadata.playCount : 0,
+            lastPlayedAt: typeof metadata?.lastPlayedAt === "number" ? metadata.lastPlayedAt : 0,
+            customArtworkData: typeof metadata?.customArtworkData === "string" ? metadata.customArtworkData : undefined,
+          });
         }
       }
       
       setLocalSongs(loadedSongs);
+      localSongsRef.current = loadedSongs;
+      setSongsLoaded(true);
       const availableFileNames = new Set(loadedSongs.map((song) => song.file.name));
       setFavoriteSongNames((previous) => previous.filter((name) => availableFileNames.has(name)));
       setPlaylists((previous) => previous.map((playlist) => ({
@@ -403,7 +497,7 @@ export default function MobileBulletproofPlayer() {
       const validQueue = queuedSongNamesRef.current.filter((name) => availableFileNames.has(name));
       queuedSongNamesRef.current = validQueue;
       setQueuedSongNames(validQueue);
-      const lastSongName = localStorage.getItem("retro_last_song_name");
+      const lastSongName = resumePlaybackEnabledRef.current ? localStorage.getItem("retro_last_song_name") : null;
       if (lastSongName) {
         const foundIdx = loadedSongs.findIndex(s => s.name === lastSongName);
         if (foundIdx !== -1) {
@@ -425,6 +519,7 @@ export default function MobileBulletproofPlayer() {
       }
     } catch {
       console.log("No persistent storage cache found.");
+      setSongsLoaded(true);
     }
   };
 
@@ -449,17 +544,22 @@ export default function MobileBulletproofPlayer() {
   };
 
   const saveSongsToStorage = async (files: File[]) => {
-    try {
-      const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
-      for (const file of files) {
+    const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
+    const saved: File[] = [];
+    const failures: string[] = [];
+    for (const file of files) {
+      try {
         const handle = await root.getFileHandle(file.name, { create: true });
         const writable = await handle.createWritable();
         await writable.write(file);
         await writable.close();
+        saved.push(file);
+      } catch (error) {
+        console.error(`Unable to save imported song "${file.name}":`, error);
+        failures.push(file.name);
       }
-    } catch (e) {
-      console.log("Storage error", e);
     }
+    return { saved, failures };
   };
 
   const clearLocalLibrary = async () => {
@@ -471,6 +571,7 @@ export default function MobileBulletproofPlayer() {
     } catch (e) {
       console.log("Storage error", e);
     }
+    if (radioModeOnRef.current) stopRadio();
     releaseAudioSource();
     setLocalSongs([]);
     setFavoriteSongNames([]);
@@ -502,6 +603,7 @@ export default function MobileBulletproofPlayer() {
       return next;
     });
     if (currentSong?.file.name === fileName) {
+      if (radioModeOnRef.current) stopRadio();
       releaseAudioSource();
       setIsPlaying(false);
       setCurrentSong(null);
@@ -541,7 +643,14 @@ export default function MobileBulletproofPlayer() {
       .filter((song): song is SongItem => song !== undefined);
   };
 
-  const playSong = (song: SongItem, index: number, playlistId: string | null = null) => {
+  const playSong = (song: SongItem, index: number, playlistId: string | null = null, radioPlayback = false) => {
+    if (!radioPlayback && radioModeOnRef.current) {
+      radioModeOnRef.current = false;
+      setRadioModeOn(false);
+      radioStationNamesRef.current = [];
+      radioPositionRef.current = 0;
+      radioSeedSongRef.current = null;
+    }
     if (sourceNodeRef.current || eqGainsRef.current.some((gain) => gain !== 0)) {
       ensureAudioGraph();
       wakeUpAudioCtx();
@@ -551,6 +660,11 @@ export default function MobileBulletproofPlayer() {
     activePlaylistIdRef.current = playlistId;
     setActivePlaylistId(playlistId);
     setCurrentSong(song);
+    const playedAt = Date.now();
+    setLocalSongs((previous) => previous.map((item) => item.file.name === song.file.name
+      ? { ...item, playCount: (item.playCount ?? 0) + 1, lastPlayedAt: playedAt }
+      : item
+    ));
     currentIndexRef.current = index;
     setCurrentIndex(index);
     setScreen("nowPlaying");
@@ -607,6 +721,28 @@ export default function MobileBulletproofPlayer() {
       return next;
     });
     triggerHaptic("select", hapticsOn);
+  };
+
+  const playSongNext = (song: SongItem) => {
+    setQueuedSongNames((previous) => {
+      const next = [song.file.name, ...previous.filter((name) => name !== song.file.name)];
+      queuedSongNamesRef.current = next;
+      return next;
+    });
+    setImportNotice(`${song.name} will play next.`);
+    triggerHaptic("select", hapticsOn);
+  };
+
+  const moveQueuedSong = (fileName: string, direction: -1 | 1) => {
+    setQueuedSongNames((previous) => {
+      const index = previous.indexOf(fileName);
+      const target = index + direction;
+      if (index < 0 || target < 0 || target >= previous.length) return previous;
+      const next = [...previous];
+      [next[index], next[target]] = [next[target], next[index]];
+      queuedSongNamesRef.current = next;
+      return next;
+    });
   };
 
   const addSongToPlaylist = (playlistId: string, song: SongItem) => {
@@ -699,15 +835,52 @@ export default function MobileBulletproofPlayer() {
     });
   };
 
+  const setSleepTimerMinutes = (minutes: number) => {
+    if (sleepFadeStartVolumeRef.current !== null && audioRef.current) {
+      audioRef.current.volume = sleepFadeStartVolumeRef.current;
+      sleepFadeStartVolumeRef.current = null;
+    }
+    setSleepTimerEndAt(Date.now() + minutes * 60_000);
+    triggerHaptic("select", hapticsOn);
+  };
+
+  const cancelSleepTimer = () => {
+    if (sleepFadeStartVolumeRef.current !== null && audioRef.current) {
+      audioRef.current.volume = sleepFadeStartVolumeRef.current;
+      sleepFadeStartVolumeRef.current = null;
+    }
+    setSleepTimerEndAt(null);
+    triggerHaptic("select", hapticsOn);
+  };
+
   const removeQueuedSong = (fileName: string) => {
+    const previous = queuedSongNamesRef.current;
+    const index = previous.indexOf(fileName);
+    if (index < 0) return;
+    setQueueUndo({ fileName, index });
+    if (queueUndoTimerRef.current) clearTimeout(queueUndoTimerRef.current);
+    queueUndoTimerRef.current = setTimeout(() => setQueueUndo(null), 5000);
+    setImportNotice("Song removed from queue. You can undo this for 5 seconds.");
+    const next = previous.filter((name) => name !== fileName);
+    queuedSongNamesRef.current = next;
+    setQueuedSongNames(next);
+  };
+
+  const undoQueueRemoval = () => {
+    if (!queueUndo) return;
     setQueuedSongNames((previous) => {
-      const next = previous.filter((name) => name !== fileName);
+      if (previous.includes(queueUndo.fileName)) return previous;
+      const next = [...previous];
+      next.splice(Math.min(queueUndo.index, next.length), 0, queueUndo.fileName);
       queuedSongNamesRef.current = next;
       return next;
     });
+    setQueueUndo(null);
+    if (queueUndoTimerRef.current) clearTimeout(queueUndoTimerRef.current);
+    setImportNotice(null);
   };
 
-  const playNextQueuedSong = () => {
+  const playNextQueuedSong = (keepRadioMode = false) => {
     const queue = [...queuedSongNamesRef.current];
     const songs = localSongsRef.current;
     const queuedIndex = queue.findIndex((name) => songs.some((song) => song.file.name === name));
@@ -725,7 +898,13 @@ export default function MobileBulletproofPlayer() {
     setQueuedSongNames([...queue]);
 
     const songIndex = songs.findIndex((song) => song.file.name === fileName);
-    playSong(songs[songIndex], songIndex);
+    if (keepRadioMode) {
+      const history = radioStationNamesRef.current.slice(0, radioPositionRef.current + 1);
+      if (history[history.length - 1] !== fileName) history.push(fileName);
+      radioStationNamesRef.current = history;
+      radioPositionRef.current = history.length - 1;
+    }
+    playSong(songs[songIndex], songIndex, null, keepRadioMode);
     return true;
   };
 
@@ -769,6 +948,258 @@ export default function MobileBulletproofPlayer() {
     playSong(song, songIndex, playlistId);
   };
 
+  const radioTextTokens = (song: SongItem) => new Set(
+    `${song.name} ${song.artist ?? ""} ${song.album ?? ""}`
+      .toLocaleLowerCase()
+      .split(/[^a-z0-9]+/)
+      .filter((token) => token.length > 2 && !["the", "and", "feat", "with", "from", "remaster"].includes(token))
+  );
+
+  const rankRadioTracks = (anchor: SongItem, excludedNames: Set<string>) => {
+    const anchorArtist = anchor.artist?.trim().toLocaleLowerCase() ?? "";
+    const anchorAlbum = anchor.album?.trim().toLocaleLowerCase() ?? "";
+    const anchorTokens = radioTextTokens(anchor);
+    const now = Date.now();
+    return localSongsRef.current
+      .filter((song) => song.file.name !== anchor.file.name && !excludedNames.has(song.file.name) && !radioSkippedNamesRef.current.has(song.file.name))
+      .map((song) => {
+        const artist = song.artist?.trim().toLocaleLowerCase() ?? "";
+        const album = song.album?.trim().toLocaleLowerCase() ?? "";
+        const sameArtist = Boolean(anchorArtist && artist === anchorArtist);
+        const sameAlbum = Boolean(anchorAlbum && album === anchorAlbum);
+        const tokens = radioTextTokens(song);
+        const sharedTokens = [...tokens].filter((token) => anchorTokens.has(token)).length;
+        const titleSimilarity = sharedTokens / Math.max(1, new Set([...tokens, ...anchorTokens]).size);
+        const favorite = favoriteSongNames.includes(song.file.name);
+        const recentPlays = song.lastPlayedAt ? Math.max(0, now - song.lastPlayedAt) : Infinity;
+        const artistTaste = artist ? radioArtistTasteRef.current[artist] ?? 0 : 0;
+        const albumTaste = album ? radioAlbumTasteRef.current[album] ?? 0 : 0;
+        const tokenTaste = [...tokens].reduce((sum, token) => sum + (radioTokenTasteRef.current[token] ?? 0), 0) / Math.max(1, tokens.size);
+        const familiarMode = !radioDiscoveryModeRef.current;
+        let weight = 1 + (sameArtist ? (familiarMode ? 3 : 0.75) : 0);
+        weight += sameAlbum ? (familiarMode ? 2 : 0.5) : 0;
+        weight += titleSimilarity * (familiarMode ? 4 : 1.25);
+        weight += artistTaste * (familiarMode ? 0.8 : 0.35) + albumTaste * (familiarMode ? 0.55 : 0.25);
+        weight += tokenTaste * (familiarMode ? 0.75 : 0.4);
+        weight += favorite ? (familiarMode ? 0.8 : 0.25) : 0;
+        weight += Math.min(1.5, Math.log2(1 + (song.playCount ?? 0)) * (familiarMode ? 0.25 : 0.1));
+        if (radioDiscoveryModeRef.current && (song.playCount ?? 0) === 0) weight += 2.5;
+        if (recentPlays < 24 * 60 * 60 * 1000) weight *= 0.25;
+        else if (recentPlays < 7 * 24 * 60 * 60 * 1000) weight *= 0.6;
+        return {
+          song,
+          priority: -Math.log(Math.max(Number.EPSILON, Math.random())) / Math.max(0.1, weight),
+          sameArtist,
+          sameAlbum,
+          titleSimilarity,
+          artistTaste,
+          albumTaste,
+          favorite,
+        };
+      })
+      .sort((left, right) => left.priority - right.priority);
+  };
+
+  const getRadioReason = (anchor: SongItem, song: SongItem) => {
+    const artist = song.artist?.trim().toLocaleLowerCase() ?? "";
+    const album = song.album?.trim().toLocaleLowerCase() ?? "";
+    if (anchor.album && song.album && anchor.album.trim().toLocaleLowerCase() === album) {
+      return `same album as ${anchor.name}`;
+    }
+    if (anchor.artist && song.artist && anchor.artist.trim().toLocaleLowerCase() === artist) {
+      return `same artist as ${anchor.name}`;
+    }
+    if ((artist && (radioArtistTasteRef.current[artist] ?? 0) > 0) || (album && (radioAlbumTasteRef.current[album] ?? 0) > 0)) {
+      return "based on your Radio feedback";
+    }
+    const anchorTokens = radioTextTokens(anchor);
+    if ([...radioTextTokens(song)].some((token) => anchorTokens.has(token))) return "similar title or album details";
+    if (favoriteSongNames.includes(song.file.name)) return "one of your favorites";
+    if ((song.playCount ?? 0) === 0) return "a new-to-you discovery";
+    return radioDiscoveryModeRef.current ? "a fresh discovery" : "a less-recent library track";
+  };
+
+  const startRadioFrom = (seed: SongItem) => {
+    if (localSongsRef.current.filter((song) => song.file.name !== seed.file.name).length === 0) {
+      setImportNotice("Retro Radio needs at least two songs in your library.");
+      return;
+    }
+    const seedIndex = localSongsRef.current.findIndex((song) => song.file.name === seed.file.name);
+    if (seedIndex < 0) return;
+    radioSeedSongRef.current = seed;
+    radioStationNamesRef.current = [seed.file.name];
+    radioPositionRef.current = 0;
+    radioSkippedNamesRef.current = new Set();
+    setRadioDiscoveryMode(false);
+    radioDiscoveryModeRef.current = false;
+    radioModeOnRef.current = true;
+    setRadioModeOn(true);
+    setRadioRecommendationReason(`Station seeded from "${seed.name}". Next track will be picked as you listen.`);
+    playSong(seed, seedIndex, null, true);
+    setImportNotice(`Retro Radio started from "${seed.name}". Your feedback will tune future picks.`);
+    triggerHaptic("confirm", hapticsOn);
+  };
+
+  const stopRadio = () => {
+    radioModeOnRef.current = false;
+    setRadioModeOn(false);
+    radioStationNamesRef.current = [];
+    radioPositionRef.current = 0;
+    radioSeedSongRef.current = null;
+    radioSkippedNamesRef.current = new Set();
+    setRadioRecommendationReason("");
+    setImportNotice("Retro Radio stopped.");
+    triggerHaptic("select", hapticsOn);
+  };
+
+  const adjustRadioTaste = (song: SongItem, amount: number) => {
+    const artist = song.artist?.trim().toLocaleLowerCase() ?? "";
+    const album = song.album?.trim().toLocaleLowerCase() ?? "";
+    let learnedFromMetadata = false;
+    if (artist) {
+      const next = { ...radioArtistTasteRef.current, [artist]: Math.max(-5, Math.min(5, (radioArtistTasteRef.current[artist] ?? 0) + amount)) };
+      radioArtistTasteRef.current = next;
+      setRadioArtistTaste(next);
+      learnedFromMetadata = true;
+    }
+    if (album) {
+      const next = { ...radioAlbumTasteRef.current, [album]: Math.max(-5, Math.min(5, (radioAlbumTasteRef.current[album] ?? 0) + amount)) };
+      radioAlbumTasteRef.current = next;
+      setRadioAlbumTaste(next);
+      learnedFromMetadata = true;
+    }
+    const tokens = [...radioTextTokens(song)].slice(0, 12);
+    if (tokens.length > 0) {
+      const next = { ...radioTokenTasteRef.current };
+      for (const token of tokens) {
+        next[token] = Math.max(-5, Math.min(5, (next[token] ?? 0) + amount * 0.5));
+      }
+      radioTokenTasteRef.current = next;
+      setRadioTokenTaste(next);
+      learnedFromMetadata = true;
+    }
+    return learnedFromMetadata;
+  };
+
+  const advanceRadio = (direction: -1 | 1 = 1, wasSkipped = false) => {
+    const station = radioStationNamesRef.current;
+    const seed = radioSeedSongRef.current;
+    if (!station.length || !seed) return false;
+    const songs = localSongsRef.current;
+    if (direction < 0) {
+      if (radioPositionRef.current <= 0) return false;
+      radioPositionRef.current -= 1;
+      const previousSong = songs.find((song) => song.file.name === station[radioPositionRef.current]);
+      if (!previousSong) return false;
+      const previousIndex = songs.indexOf(previousSong);
+      playSong(previousSong, previousIndex, null, true);
+      setRadioRecommendationReason(`Back in this station • ${getRadioReason(seed, previousSong)}`);
+      return true;
+    }
+
+    const currentName = station[radioPositionRef.current];
+    const anchor = songs.find((song) => song.file.name === currentName) ?? currentSong ?? seed;
+    let feedbackPrefix = "";
+    if (wasSkipped) {
+      radioSkippedNamesRef.current.add(anchor.file.name);
+      const learned = adjustRadioTaste(anchor, -2);
+      feedbackPrefix = learned
+        ? `Skip learned for ${anchor.artist || anchor.album}. `
+        : "Track skipped for this station. ";
+    }
+    const excludedNames = new Set(station);
+    let candidates = rankRadioTracks(anchor, excludedNames);
+    if (candidates.length === 0) {
+      candidates = rankRadioTracks(anchor, new Set([anchor.file.name]));
+      if (candidates.length === 0) {
+        stopRadio();
+        setImportNotice("No more available tracks for Retro Radio. Add songs or clear a station skip to continue.");
+        return false;
+      }
+      radioStationNamesRef.current = [anchor.file.name];
+      radioPositionRef.current = 0;
+    }
+
+    const nextPick = candidates[0];
+    if (!nextPick) return false;
+    const nextSong = nextPick.song;
+    radioStationNamesRef.current = [...radioStationNamesRef.current.slice(0, radioPositionRef.current + 1), nextSong.file.name];
+    radioPositionRef.current = radioStationNamesRef.current.length - 1;
+    const songIndex = songs.findIndex((song) => song.file.name === nextSong.file.name);
+    if (songIndex < 0) return false;
+    playSong(nextSong, songIndex, null, true);
+    setRadioRecommendationReason(`${feedbackPrefix}${radioDiscoveryModeRef.current ? "Discovery" : "Familiar"} pick • ${getRadioReason(anchor, nextSong)}`);
+    return true;
+  };
+
+  const giveRadioPositiveFeedback = () => {
+    if (!currentSong) return;
+    const learned = adjustRadioTaste(currentSong, 2);
+    setRadioRecommendationReason(learned
+      ? currentSong.artist || currentSong.album
+        ? `Got it — future picks will lean toward ${currentSong.artist || currentSong.album}.`
+        : `Got it — future picks will follow themes in "${currentSong.name}".`
+      : "No usable track details to learn from. Add title, artist, or album information.");
+    triggerHaptic("confirm", hapticsOn);
+  };
+
+  const toggleRadioDiscovery = () => {
+    const next = !radioDiscoveryModeRef.current;
+    radioDiscoveryModeRef.current = next;
+    setRadioDiscoveryMode(next);
+    setRadioRecommendationReason(next
+      ? "Discovery mode: prioritize unfamiliar tracks and variety."
+      : "Familiar mode: lean into related artists, albums, and your feedback.");
+    triggerHaptic("select", hapticsOn);
+  };
+
+  const rejectRadioTrack = () => {
+    if (radioModeOnRef.current) advanceRadio(1, true);
+  };
+
+  const renderRadioControls = (compact = false) => {
+    if (!radioModeOn || !currentSong) return null;
+    return (
+      <section className={`mx-auto mt-1.5 w-full max-w-md rounded-xl border border-white/15 bg-black/30 text-white shadow-sm ${compact ? "p-1.5" : "p-2.5"}`}>
+        <div className="flex min-w-0 items-center justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-2 text-[9px] font-bold uppercase tracking-[0.12em] text-white/80">
+            <Radio size={13} className="shrink-0" />
+            <span className="truncate">Retro Radio</span>
+          </div>
+          <span className="shrink-0 rounded-full bg-white/10 px-2 py-1 text-[8px] font-bold uppercase tracking-wider text-white/70">
+            {radioDiscoveryMode ? "Discovery" : "Familiar mix"}
+          </span>
+        </div>
+        <p className={`mt-1.5 break-words text-[9px] leading-relaxed text-white/70 ${compact ? "line-clamp-2 text-[8px] leading-snug" : ""}`}>{radioRecommendationReason}</p>
+        <div className={`mt-1.5 grid gap-1.5 ${compact ? "grid-cols-3" : "grid-cols-2 gap-2"}`}>
+          <button
+            type="button"
+            onClick={giveRadioPositiveFeedback}
+            className={`min-w-0 rounded-lg border border-white/10 bg-white/10 font-bold leading-tight transition-colors hover:bg-white/15 active:bg-white/20 ${compact ? "min-h-7 break-words px-1 py-1 text-center text-[8px]" : "min-h-9 px-2.5 py-2 text-[9px]"}`}
+          >
+            More like this
+          </button>
+          <button
+            type="button"
+            onClick={toggleRadioDiscovery}
+            className={`min-w-0 rounded-lg border border-white/10 bg-white/10 font-bold leading-tight transition-colors hover:bg-white/15 active:bg-white/20 ${compact ? "min-h-7 break-words px-1 py-1 text-center text-[8px]" : "min-h-9 px-2.5 py-2 text-[9px]"}`}
+          >
+            {radioDiscoveryMode ? "Switch to Familiar" : "Surprise me"}
+          </button>
+          <button
+            type="button"
+            onClick={rejectRadioTrack}
+            aria-label="Not for me; skip and teach Retro Radio"
+            title="Skip this and tune future picks away from it"
+            className={`min-w-0 rounded-lg border border-white/10 bg-black/20 font-semibold text-white/65 transition-colors hover:bg-white/10 hover:text-white active:bg-white/15 ${compact ? "min-h-7 break-words px-1 py-1 text-center text-[8px]" : "col-span-2 min-h-8 px-2.5 py-1.5 text-[9px]"}`}
+          >
+            {compact ? "Not for me" : "Not for me · skip this track"}
+          </button>
+        </div>
+      </section>
+    );
+  };
+
   const handleNextSong = () => {
     const playbackSongs = getPlaybackSongs();
     if (activePlaylistIdRef.current) {
@@ -777,13 +1208,21 @@ export default function MobileBulletproofPlayer() {
       playSong(playbackSongs[nextIndex], nextIndex, activePlaylistIdRef.current);
       return;
     }
-    if (playNextQueuedSong()) return;
+    if (playNextQueuedSong(radioModeOnRef.current)) return;
+    if (radioModeOnRef.current) {
+      advanceRadio(1, true);
+      return;
+    }
     if (localSongs.length === 0) return;
     const nextIdx = shuffleOnRef.current ? pickRandomIndex(localSongs.length, currentIndex) : (currentIndex + 1) % localSongs.length;
     playSong(localSongs[nextIdx], nextIdx);
   };
 
   const handlePrevSong = () => {
+    if (radioModeOnRef.current) {
+      advanceRadio(-1);
+      return;
+    }
     const playbackSongs = getPlaybackSongs();
     if (playbackSongs.length === 0) return;
     const prevIdx = (currentIndexRef.current - 1 + playbackSongs.length) % playbackSongs.length;
@@ -807,7 +1246,11 @@ export default function MobileBulletproofPlayer() {
     const playbackSongs = getPlaybackSongs();
     if (playbackSongs.length === 0) return;
 
-    if (!activePlaylistIdRef.current && playNextQueuedSong()) return;
+    if (!activePlaylistIdRef.current && playNextQueuedSong(radioModeOnRef.current)) return;
+    if (radioModeOnRef.current) {
+      advanceRadio();
+      return;
+    }
 
     if (shuffleOnRef.current && !activePlaylistIdRef.current) {
       const currentName = playbackSongs[currentIndexRef.current]?.file.name;
@@ -873,6 +1316,16 @@ export default function MobileBulletproofPlayer() {
     
     const savedHaptics = localStorage.getItem("retro_haptics");
     if (savedHaptics !== null) setHapticsOn(savedHaptics === "true");
+
+    const savedRadioArtistTaste = readRadioTasteProfile("retro_radio_artist_taste");
+    radioArtistTasteRef.current = savedRadioArtistTaste;
+    setRadioArtistTaste(savedRadioArtistTaste);
+    const savedRadioAlbumTaste = readRadioTasteProfile("retro_radio_album_taste");
+    radioAlbumTasteRef.current = savedRadioAlbumTaste;
+    setRadioAlbumTaste(savedRadioAlbumTaste);
+    const savedRadioTokenTaste = readRadioTasteProfile("retro_radio_token_taste");
+    radioTokenTasteRef.current = savedRadioTokenTaste;
+    setRadioTokenTaste(savedRadioTokenTaste);
     
     const savedSpeed = localStorage.getItem("retro_speed");
     if (savedSpeed) setPlaybackSpeed(parseFloat(savedSpeed));
@@ -887,6 +1340,30 @@ export default function MobileBulletproofPlayer() {
 
     const savedClock = localStorage.getItem("retro_clock24");
     if (savedClock !== null) setClock24h(savedClock === "true");
+
+    const savedDetailedView = localStorage.getItem("retro_detailed_view");
+    if (savedDetailedView !== null) setDetailedViewEnabled(savedDetailedView === "true");
+
+    const savedArtworkBackground = localStorage.getItem("retro_artwork_lcd_background");
+    if (savedArtworkBackground !== null) setArtworkLcdBackgroundEnabled(savedArtworkBackground === "true");
+
+    const savedResumePlayback = localStorage.getItem("retro_resume_playback");
+    if (savedResumePlayback !== null) {
+      const enabled = savedResumePlayback === "true";
+      setResumePlaybackEnabled(enabled);
+      resumePlaybackEnabledRef.current = enabled;
+    }
+    const savedSeekJump = Number(localStorage.getItem("retro_seek_jump"));
+    if ([5, 10, 15].includes(savedSeekJump)) setSeekJumpSeconds(savedSeekJump);
+    const savedSleepFade = localStorage.getItem("retro_sleep_fade");
+    if (savedSleepFade !== null) {
+      const enabled = savedSleepFade === "true";
+      setSleepFadeEnabled(enabled);
+      sleepFadeEnabledRef.current = enabled;
+    }
+    setLargeTextEnabled(localStorage.getItem("retro_large_text") === "true");
+    setHighContrastEnabled(localStorage.getItem("retro_high_contrast") === "true");
+    setReducedMotionEnabled(localStorage.getItem("retro_reduced_motion") === "true");
 
     const savedEQ = localStorage.getItem("retro_eq_gains");
     if (savedEQ) {
@@ -950,13 +1427,23 @@ export default function MobileBulletproofPlayer() {
       setCurrentTimeStr(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !clock24hRef.current }));
 
       const endAt = sleepTimerEndAtRef.current;
-      if (endAt !== null && Date.now() >= endAt) {
-        setIsPlaying(false);
-        audioRef.current?.pause();
-        setSleepTimerEndAt(null);
+      if (endAt !== null) {
+        const remaining = endAt - Date.now();
+        const audio = audioRef.current;
+        if (sleepFadeEnabledRef.current && remaining <= 10_000 && remaining > 0 && audio) {
+          if (sleepFadeStartVolumeRef.current === null) sleepFadeStartVolumeRef.current = audio.volume;
+          audio.volume = Math.max(0, sleepFadeStartVolumeRef.current * (remaining / 10_000));
+        }
+        if (remaining <= 0) {
+          if (audio && sleepFadeStartVolumeRef.current !== null) audio.volume = sleepFadeStartVolumeRef.current;
+          sleepFadeStartVolumeRef.current = null;
+          setIsPlaying(false);
+          audio?.pause();
+          setSleepTimerEndAt(null);
+        }
       }
 
-      if (audioRef.current && !audioRef.current.paused) {
+      if (resumePlaybackEnabledRef.current && audioRef.current && !audioRef.current.paused) {
         localStorage.setItem("retro_last_time", audioRef.current.currentTime.toString());
       }
     };
@@ -1071,6 +1558,41 @@ export default function MobileBulletproofPlayer() {
   useEffect(() => { localStorage.setItem("retro_shuffle", String(shuffleOn)); }, [shuffleOn]);
   useEffect(() => { localStorage.setItem("retro_repeat", repeatMode); }, [repeatMode]);
   useEffect(() => { localStorage.setItem("retro_clock24", String(clock24h)); }, [clock24h]);
+  useEffect(() => { localStorage.setItem("retro_detailed_view", String(detailedViewEnabled)); }, [detailedViewEnabled]);
+  useEffect(() => { localStorage.setItem("retro_artwork_lcd_background", String(artworkLcdBackgroundEnabled)); }, [artworkLcdBackgroundEnabled]);
+  useEffect(() => { localStorage.setItem("retro_resume_playback", String(resumePlaybackEnabled)); }, [resumePlaybackEnabled]);
+  useEffect(() => { localStorage.setItem("retro_seek_jump", String(seekJumpSeconds)); }, [seekJumpSeconds]);
+  useEffect(() => { localStorage.setItem("retro_sleep_fade", String(sleepFadeEnabled)); }, [sleepFadeEnabled]);
+  useEffect(() => { localStorage.setItem("retro_large_text", String(largeTextEnabled)); }, [largeTextEnabled]);
+  useEffect(() => { localStorage.setItem("retro_high_contrast", String(highContrastEnabled)); }, [highContrastEnabled]);
+  useEffect(() => { localStorage.setItem("retro_reduced_motion", String(reducedMotionEnabled)); }, [reducedMotionEnabled]);
+  useEffect(() => {
+    if (!libraryPreferencesLoaded) return;
+    try {
+      localStorage.setItem("retro_radio_artist_taste", JSON.stringify(radioArtistTaste));
+    } catch (error) {
+      console.error("Unable to save Retro Radio artist preferences:", error);
+      setImportNotice("Radio learning could not be saved. Device storage may be full.");
+    }
+  }, [radioArtistTaste, libraryPreferencesLoaded]);
+  useEffect(() => {
+    if (!libraryPreferencesLoaded) return;
+    try {
+      localStorage.setItem("retro_radio_album_taste", JSON.stringify(radioAlbumTaste));
+    } catch (error) {
+      console.error("Unable to save Retro Radio album preferences:", error);
+      setImportNotice("Radio learning could not be saved. Device storage may be full.");
+    }
+  }, [radioAlbumTaste, libraryPreferencesLoaded]);
+  useEffect(() => {
+    if (!libraryPreferencesLoaded) return;
+    try {
+      localStorage.setItem("retro_radio_token_taste", JSON.stringify(radioTokenTaste));
+    } catch (error) {
+      console.error("Unable to save Retro Radio title preferences:", error);
+      setImportNotice("Radio learning could not be saved. Device storage may be full.");
+    }
+  }, [radioTokenTaste, libraryPreferencesLoaded]);
   useEffect(() => { localStorage.setItem("retro_eq_gains", JSON.stringify(eqGains)); }, [eqGains]);
   useEffect(() => {
     if (libraryPreferencesLoaded) {
@@ -1087,12 +1609,43 @@ export default function MobileBulletproofPlayer() {
       localStorage.setItem("retro_playlists", JSON.stringify(playlists));
     }
   }, [playlists, libraryPreferencesLoaded]);
+  useEffect(() => {
+    if (!songsLoaded) return;
+    const metadata = Object.fromEntries(localSongs.map((song) => [
+      song.file.name,
+      {
+        name: song.name,
+        artist: song.artist ?? "",
+        album: song.album ?? "",
+        importedAt: song.importedAt ?? song.file.lastModified,
+        playCount: song.playCount ?? 0,
+        lastPlayedAt: song.lastPlayedAt ?? 0,
+        customArtworkData: song.customArtworkData ?? "",
+      },
+    ]));
+    try {
+      localStorage.setItem("retro_song_metadata", JSON.stringify(metadata));
+    } catch (error) {
+      console.error("Unable to save song metadata:", error);
+      setImportNotice("Song details could not be saved. Device storage may be full.");
+    }
+  }, [localSongs, songsLoaded]);
 
   useEffect(() => {
-    if (currentSong) {
+    if (currentSong && resumePlaybackEnabled) {
       localStorage.setItem("retro_last_song_name", currentSong.name);
     }
-  }, [currentSong]);
+  }, [currentSong, resumePlaybackEnabled]);
+
+  useEffect(() => {
+    if (!importNotice || queueUndo) return;
+    const timeoutId = setTimeout(() => setImportNotice(null), 6000);
+    return () => clearTimeout(timeoutId);
+  }, [importNotice, queueUndo]);
+
+  useEffect(() => () => {
+    if (queueUndoTimerRef.current) clearTimeout(queueUndoTimerRef.current);
+  }, []);
 
   useEffect(() => {
     if (audioRef.current) audioRef.current.playbackRate = playbackSpeed;
@@ -1215,6 +1768,8 @@ export default function MobileBulletproofPlayer() {
       navigator.mediaSession.setActionHandler("previoustrack", null);
       navigator.mediaSession.setActionHandler("nexttrack", null);
       navigator.mediaSession.setActionHandler("seekto", null);
+      navigator.mediaSession.setActionHandler("seekbackward", null);
+      navigator.mediaSession.setActionHandler("seekforward", null);
     };
 
     if (!currentSong || screen === "moviePlaying") {
@@ -1224,8 +1779,8 @@ export default function MobileBulletproofPlayer() {
 
     navigator.mediaSession.metadata = new MediaMetadata({
       title: currentSong.name,
-      artist: "Local Device Library",
-      album: "Retro Custom Player",
+      artist: currentSong.artist || "Local Device Library",
+      album: currentSong.album || "Retro Custom Player",
       artwork: currentSong.artworkUrl
         ? [{ src: currentSong.artworkUrl, sizes: "512x512", type: "image/jpeg" }]
         : [],
@@ -1239,8 +1794,19 @@ export default function MobileBulletproofPlayer() {
       if (!audioRef.current || details.seekTime === undefined) return;
       audioRef.current.currentTime = Math.max(0, Math.min(details.seekTime, audioRef.current.duration || details.seekTime));
     });
+    navigator.mediaSession.setActionHandler("seekbackward", (details) => {
+      if (!audioRef.current) return;
+      audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - (details.seekOffset ?? seekJumpSeconds));
+    });
+    navigator.mediaSession.setActionHandler("seekforward", (details) => {
+      if (!audioRef.current) return;
+      audioRef.current.currentTime = Math.min(
+        audioRef.current.duration || Infinity,
+        audioRef.current.currentTime + (details.seekOffset ?? seekJumpSeconds)
+      );
+    });
     return clearMediaSession;
-  }, [currentSong, localSongs, currentIndex, screen]);
+  }, [currentSong, localSongs, currentIndex, screen, seekJumpSeconds]);
 
   // --- MENUS & UI LOGIC ---
   const menus = useMemo((): Record<string, Menu> => {
@@ -1251,6 +1817,73 @@ export default function MobileBulletproofPlayer() {
       .map((name) => localSongs.find((song) => song.file.name === name))
       .filter((song): song is SongItem => song !== undefined);
     const playlistMenus: Record<string, Menu> = {};
+    const browseMenus: Record<string, Menu> = {};
+    const artists = [...new Set(localSongs.map((song) => song.artist?.trim()).filter((artist): artist is string => Boolean(artist)))].sort((a, b) => a.localeCompare(b));
+    const albums = [...new Set(localSongs.map((song) => song.album?.trim()).filter((album): album is string => Boolean(album)))].sort((a, b) => a.localeCompare(b));
+    artists.forEach((artist) => {
+      const id = `browse_artist_${encodeURIComponent(artist)}`;
+      browseMenus[id] = {
+        id,
+        title: artist,
+        items: localSongs.filter((song) => song.artist?.trim() === artist)
+          .map((song) => ({ label: song.name, type: "song" as const, song })),
+      };
+    });
+    albums.forEach((album) => {
+      const id = `browse_album_${encodeURIComponent(album)}`;
+      browseMenus[id] = {
+        id,
+        title: album,
+        items: localSongs.filter((song) => song.album?.trim() === album)
+          .map((song) => ({ label: song.name, type: "song" as const, song })),
+      };
+    });
+    browseMenus.browse_artists = {
+      id: "browse_artists",
+      title: "Artists",
+      items: artists.length
+        ? artists.map((artist) => ({ label: artist, type: "menu" as const, targetId: `browse_artist_${encodeURIComponent(artist)}` }))
+        : [{ label: "Add artist details to songs to browse by artist.", type: "action" as const, actionId: "noop" }],
+    };
+    browseMenus.browse_albums = {
+      id: "browse_albums",
+      title: "Albums",
+      items: albums.length
+        ? albums.map((album) => ({ label: album, type: "menu" as const, targetId: `browse_album_${encodeURIComponent(album)}` }))
+        : [{ label: "Add album details to songs to browse by album.", type: "action" as const, actionId: "noop" }],
+    };
+    browseMenus.browse_recently_added = {
+      id: "browse_recently_added",
+      title: "Recently Added",
+      items: [...localSongs].sort((a, b) => (b.importedAt ?? b.file.lastModified) - (a.importedAt ?? a.file.lastModified))
+        .map((song) => ({ label: song.name, type: "song" as const, song })),
+    };
+    browseMenus.browse_recently_played = {
+      id: "browse_recently_played",
+      title: "Recently Played",
+      items: [...localSongs].filter((song) => (song.lastPlayedAt ?? 0) > 0)
+        .sort((a, b) => (b.lastPlayedAt ?? 0) - (a.lastPlayedAt ?? 0))
+        .map((song) => ({ label: song.name, type: "song" as const, song })),
+    };
+    browseMenus.browse_most_played = {
+      id: "browse_most_played",
+      title: "Most Played",
+      items: [...localSongs].filter((song) => (song.playCount ?? 0) > 0)
+        .sort((a, b) => (b.playCount ?? 0) - (a.playCount ?? 0))
+        .map((song) => ({ label: song.name, type: "song" as const, song })),
+    };
+    browseMenus.browse_library = {
+      id: "browse_library",
+      title: "Browse Library",
+      items: [
+        { label: "Artists", type: "menu", targetId: "browse_artists" },
+        { label: "Albums", type: "menu", targetId: "browse_albums" },
+        { label: "Recently Added", type: "menu", targetId: "browse_recently_added" },
+        { label: "Recently Played", type: "menu", targetId: "browse_recently_played" },
+        { label: "Most Played", type: "menu", targetId: "browse_most_played" },
+        { label: "Clear Play History", type: "action", actionId: "clear_play_history" },
+      ],
+    };
     playlists.forEach((playlist) => {
       const playlistSongs = playlist.songNames
         .map((name) => localSongs.find((song) => song.file.name === name))
@@ -1297,12 +1930,14 @@ export default function MobileBulletproofPlayer() {
 
     return {
       ...playlistMenus,
+      ...browseMenus,
       root: {
         id: "root",
         title: "Main Menu",
         items: [
           ...(currentSong ? [{ label: "Now Playing", type: "action" as const, actionId: "go_now_playing" }] : []),
           { label: "Local Audio Library", type: "menu", targetId: "local" },
+          { label: radioModeOn ? "Retro Radio (Playing)" : "Retro Radio", type: "menu", targetId: "radio_station" },
           { label: "Movies", type: "action", actionId: "open_movies" },
           { label: "Playback Tools", type: "menu", targetId: "tools" },
           { label: "System Settings", type: "menu", targetId: "settings" }
@@ -1322,11 +1957,31 @@ export default function MobileBulletproofPlayer() {
           ? queuedSongs.map((song) => ({ label: song.name, type: "song" as const, song }))
           : [{ label: "(Queue is empty)", type: "action" as const, actionId: "noop" }],
       },
+      radio_station: {
+        id: "radio_station",
+        title: "Retro Radio",
+        items: [
+          ...(radioModeOn ? [{ label: "Stop Retro Radio", type: "action" as const, actionId: "stop_radio" }] : []),
+          ...(localSongs.length > 1
+            ? localSongs.map((song) => ({
+                label: `Start station from ${song.name}`,
+                type: "action" as const,
+                actionId: "start_radio_song",
+                song,
+              }))
+            : [{ label: "Import at least two songs to start a station.", type: "action" as const, actionId: "noop" }]),
+        ],
+      },
       tools: {
         id: "tools",
         title: "Pro Tools",
         items: [
           { label: "[ 5-Band Equalizer ]", type: "action", actionId: "open_eq" },
+          {
+            label: radioModeOn ? "Stop Retro Radio" : currentSong ? "Start Retro Radio from Current Song" : "Retro Radio (play a song first)",
+            type: "action",
+            actionId: radioModeOn ? "stop_radio" : currentSong ? "start_radio_current" : "noop",
+          },
         ]
       },
       local: {
@@ -1335,6 +1990,7 @@ export default function MobileBulletproofPlayer() {
         items: [
           { label: "All Songs", type: "menu", targetId: "local_songs" },
           { label: "[ Import New Songs ]", type: "action", actionId: "scan_local" },
+          { label: "Browse Library", type: "menu", targetId: "browse_library" },
           { label: `Favorites (${favoriteSongNames.length})`, type: "menu", targetId: "favorites" },
           { label: `Playlists (${playlists.length})`, type: "menu", targetId: "playlists" },
           { label: `Play Queue (${queuedSongNames.length})`, type: "menu", targetId: "queue" },
@@ -1386,6 +2042,12 @@ export default function MobileBulletproofPlayer() {
           { label: `Haptics: ${hapticsOn ? "ON" : "OFF"}`, type: "action", actionId: "toggle_haptics" },
           { label: `Shuffle: ${shuffleOn ? "ON" : "OFF"}`, type: "action", actionId: "toggle_shuffle" },
           { label: `Repeat: ${repeatMode === "off" ? "OFF" : repeatMode === "one" ? "ONE" : "ALL"}`, type: "action", actionId: "cycle_repeat" },
+          { label: `Detailed Now Playing: ${detailedViewEnabled ? "ON" : "OFF"}`, type: "action", actionId: "toggle_detailed_view" },
+          { label: `Artwork LCD Background: ${artworkLcdBackgroundEnabled ? "ON" : "OFF"}`, type: "action", actionId: "toggle_artwork_background" },
+          { label: `Resume Last Track: ${resumePlaybackEnabled ? "ON" : "OFF"}`, type: "action", actionId: "toggle_resume_playback" },
+          { label: `Seek Jump: ${seekJumpSeconds}s`, type: "menu", targetId: "settings_seek" },
+          { label: `Sleep Timer Fade: ${sleepFadeEnabled ? "ON" : "OFF"}`, type: "action", actionId: "toggle_sleep_fade" },
+          { label: "Accessibility", type: "menu", targetId: "settings_accessibility" },
           { label: `Clock: ${clock24h ? "24H" : "12H"}`, type: "action", actionId: "toggle_clock" },
           {
             label: sleepTimerEndAt ? `Sleep Timer: ${Math.max(1, Math.ceil((sleepTimerEndAt - Date.now()) / 60000))}m` : "Sleep Timer",
@@ -1406,6 +2068,24 @@ export default function MobileBulletproofPlayer() {
           { label: "45 Minutes", type: "action", actionId: "sleep_45" },
           { label: "60 Minutes", type: "action", actionId: "sleep_60" },
         ]
+      },
+      settings_seek: {
+        id: "settings_seek",
+        title: "Seek Jump",
+        items: [5, 10, 15].map((seconds) => ({
+          label: `${seekJumpSeconds === seconds ? "✓ " : ""}${seconds} Seconds`,
+          type: "action" as const,
+          actionId: `seek_jump:${seconds}`,
+        })),
+      },
+      settings_accessibility: {
+        id: "settings_accessibility",
+        title: "Accessibility",
+        items: [
+          { label: `Larger Text: ${largeTextEnabled ? "ON" : "OFF"}`, type: "action", actionId: "toggle_large_text" },
+          { label: `High Contrast: ${highContrastEnabled ? "ON" : "OFF"}`, type: "action", actionId: "toggle_high_contrast" },
+          { label: `Reduced Motion: ${reducedMotionEnabled ? "ON" : "OFF"}`, type: "action", actionId: "toggle_reduced_motion" },
+        ],
       },
       settings_theme: {
         id: "settings_theme",
@@ -1458,8 +2138,17 @@ export default function MobileBulletproofPlayer() {
     hapticsOn,
     shuffleOn,
     repeatMode,
+    radioModeOn,
     clock24h,
     sleepTimerEndAt,
+    detailedViewEnabled,
+    artworkLcdBackgroundEnabled,
+    resumePlaybackEnabled,
+    seekJumpSeconds,
+    sleepFadeEnabled,
+    largeTextEnabled,
+    highContrastEnabled,
+    reducedMotionEnabled,
   ]);
 
   const currentMenuId = menuStack[menuStack.length - 1];
@@ -1468,8 +2157,10 @@ export default function MobileBulletproofPlayer() {
     currentMenuId === "local_songs" ||
     currentMenuId === "favorites" ||
     currentMenuId === "queue" ||
+    currentMenuId === "radio_station" ||
     currentMenuId === "playlists" ||
     currentMenuId === "local_edit" ||
+    currentMenuId.startsWith("browse_") ||
     (currentMenuId.startsWith("playlist_") && !currentMenuId.startsWith("playlist_options_"));
   const visibleMenuItems = isSearchableMenu && menuSearch.trim()
     ? currentMenu.items.filter((item) => item.label.toLocaleLowerCase().includes(menuSearch.trim().toLocaleLowerCase()))
@@ -1644,6 +2335,20 @@ export default function MobileBulletproofPlayer() {
     }
 
     if (selectedItem.type !== "action") return;
+    if (selectedItem.actionId === "start_radio_song" && selectedItem.song) {
+      startRadioFrom(selectedItem.song);
+      return;
+    }
+    if (selectedItem.actionId === "edit_song_metadata" && selectedItem.song) {
+      setEditingSong(selectedItem.song);
+      setCustomArtworkData(selectedItem.song.customArtworkData ?? "");
+      return;
+    }
+    if (selectedItem.actionId?.startsWith("seek_jump:")) {
+      const seconds = Number(selectedItem.actionId.slice("seek_jump:".length));
+      if ([5, 10, 15].includes(seconds)) setSeekJumpSeconds(seconds);
+      return;
+    }
     if (selectedItem.actionId === "playlist_add_song" && selectedItem.playlistId && selectedItem.song) {
       addSongToPlaylist(selectedItem.playlistId, selectedItem.song);
       return;
@@ -1687,6 +2392,12 @@ export default function MobileBulletproofPlayer() {
           setEqEditMode(false);
           setScreen("eq");
           break;
+        case "start_radio_current":
+          if (currentSong) startRadioFrom(currentSong);
+          break;
+        case "stop_radio":
+          stopRadio();
+          break;
         case "go_now_playing":
           setScreen("nowPlaying");
           break;
@@ -1707,23 +2418,60 @@ export default function MobileBulletproofPlayer() {
         case "cycle_repeat":
           cycleRepeat();
           break;
+        case "toggle_detailed_view":
+          setDetailedViewEnabled((previous) => {
+            const next = !previous;
+            if (!next) setIsDetailedNowPlaying(false);
+            return next;
+          });
+          break;
+        case "toggle_artwork_background":
+          setArtworkLcdBackgroundEnabled((previous) => !previous);
+          break;
+        case "toggle_resume_playback":
+          setResumePlaybackEnabled((previous) => !previous);
+          resumePlaybackEnabledRef.current = !resumePlaybackEnabled;
+          if (resumePlaybackEnabled) {
+            localStorage.removeItem("retro_last_song_name");
+            localStorage.removeItem("retro_last_time");
+          }
+          break;
+        case "toggle_sleep_fade":
+          setSleepFadeEnabled((previous) => !previous);
+          break;
+        case "toggle_large_text":
+          setLargeTextEnabled((previous) => !previous);
+          break;
+        case "toggle_high_contrast":
+          setHighContrastEnabled((previous) => !previous);
+          break;
+        case "toggle_reduced_motion":
+          setReducedMotionEnabled((previous) => !previous);
+          break;
+        case "clear_play_history":
+          if (window.confirm("Clear recently played and most played history?")) {
+            setLocalSongs((previous) => previous.map((song) => ({ ...song, playCount: 0, lastPlayedAt: 0 })));
+            localStorage.removeItem("retro_last_song_name");
+            localStorage.removeItem("retro_last_time");
+          }
+          break;
         case "toggle_clock":
           setClock24h((previous) => !previous);
           break;
         case "sleep_off":
-          setSleepTimerEndAt(null);
+          cancelSleepTimer();
           break;
         case "sleep_15":
-          setSleepTimerEndAt(Date.now() + 15 * 60 * 1000);
+          setSleepTimerMinutes(15);
           break;
         case "sleep_30":
-          setSleepTimerEndAt(Date.now() + 30 * 60 * 1000);
+          setSleepTimerMinutes(30);
           break;
         case "sleep_45":
-          setSleepTimerEndAt(Date.now() + 45 * 60 * 1000);
+          setSleepTimerMinutes(45);
           break;
         case "sleep_60":
-          setSleepTimerEndAt(Date.now() + 60 * 60 * 1000);
+          setSleepTimerMinutes(60);
           break;
         case "clear_library":
           if (window.confirm("Remove all imported songs from this device? This can't be undone.")) {
@@ -1800,9 +2548,11 @@ export default function MobileBulletproofPlayer() {
 
     if (screen === "nowPlaying") {
       triggerHaptic("confirm", hapticsOn);
-      wakeUpAudioCtx();
-      if (currentSong) {
-        setIsPlaying(!isPlaying);
+      if (detailedViewEnabled && currentSong && !isDetailedNowPlaying) {
+        setIsDetailedNowPlaying(true);
+      } else if (currentSong) {
+        wakeUpAudioCtx();
+        setIsPlaying((previous) => !previous);
       }
       return;
     }
@@ -1825,7 +2575,7 @@ export default function MobileBulletproofPlayer() {
     wakeUpAudioCtx();
 
     if (currentSong) {
-      setIsPlaying(!isPlaying);
+      setIsPlaying((previous) => !previous);
     }
   };
 
@@ -1865,6 +2615,8 @@ export default function MobileBulletproofPlayer() {
         setScreen("menu"); 
       }
     } else if (screen === "nowPlaying") {
+      setIsDetailedNowPlaying(false);
+      if (isDetailedNowPlaying) return;
       setScreen("menu"); 
     } else if (menuStack.length > 1) {
       const newStack = [...menuStack];
@@ -1875,18 +2627,129 @@ export default function MobileBulletproofPlayer() {
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files.length > 0) {
-      const newFiles = Array.from(e.target.files);
-      const newSongs: SongItem[] = [];
-      for (const file of newFiles) {
-        const artworkUrl = await extractArtwork(file);
-        newSongs.push({ file, name: file.name.replace(/\.[^/.]+$/, ""), artworkUrl });
-      }
-      const updatedList = [...localSongs, ...newSongs];
-      setLocalSongs(updatedList);
-      saveSongsToStorage(newFiles);
-    }
+    const selectedFiles = Array.from(e.target.files ?? []);
     e.target.value = "";
+    if (selectedFiles.length === 0) return;
+
+    const knownNames = new Set(localSongsRef.current.map((song) => song.file.name));
+    const seenNames = new Set(knownNames);
+    const candidates: File[] = [];
+    let duplicateCount = 0;
+    let unsupportedCount = 0;
+    selectedFiles.forEach((file) => {
+      const supported = file.type.startsWith("audio/") || /\.(mp3|m4a|aac|wav|flac|ogg|oga|opus|aif|aiff|wma)$/i.test(file.name);
+      if (!supported) {
+        unsupportedCount += 1;
+        console.warn(`Skipping unsupported audio file "${file.name}" (${file.type || "unknown type"}).`);
+      } else if (seenNames.has(file.name)) {
+        duplicateCount += 1;
+      } else {
+        seenNames.add(file.name);
+        candidates.push(file);
+      }
+    });
+    if (candidates.length === 0) {
+      const notes = [
+        duplicateCount ? `${duplicateCount} duplicate file(s) were skipped.` : "",
+        unsupportedCount ? `${unsupportedCount} unsupported file(s) were skipped.` : "",
+      ].filter(Boolean).join(" ");
+      setImportNotice(notes || "No new songs to import.");
+      return;
+    }
+
+    const importedSongs: SongItem[] = [];
+    const failedNames: string[] = [];
+    for (let index = 0; index < candidates.length; index += 1) {
+      const file = candidates[index];
+      setImportProgress({ current: index + 1, total: candidates.length, fileName: file.name });
+      try {
+        const artworkUrl = await extractArtwork(file);
+        const { saved, failures } = await saveSongsToStorage([file]);
+        if (saved.length === 0 || failures.length > 0) {
+          failedNames.push(file.name);
+          continue;
+        }
+        importedSongs.push({
+          file,
+          name: file.name.replace(/\.[^/.]+$/, ""),
+          artworkUrl,
+          artist: "",
+          album: "",
+          importedAt: Date.now(),
+          playCount: 0,
+          lastPlayedAt: 0,
+        });
+      } catch (error) {
+        console.error(`Unable to import audio file "${file.name}":`, error);
+        failedNames.push(file.name);
+      }
+    }
+    setImportProgress(null);
+    if (importedSongs.length > 0) {
+      setLocalSongs((previous) => [...previous, ...importedSongs]);
+      localSongsRef.current = [...localSongsRef.current, ...importedSongs];
+    }
+    const noticeParts = [
+      importedSongs.length ? `Imported ${importedSongs.length} song(s).` : "",
+      duplicateCount ? `Skipped ${duplicateCount} duplicate file(s).` : "",
+      failedNames.length ? `Could not save ${failedNames.length} file(s): ${failedNames.join(", ")}.` : "",
+      unsupportedCount ? `Skipped ${unsupportedCount} unsupported file(s).` : "",
+    ].filter(Boolean);
+    setImportNotice(noticeParts.join(" ") || "No new songs were imported.");
+  };
+
+  const handleCustomArtworkUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file || !editingSong) return;
+    if (!file.type.startsWith("image/")) {
+      setImportNotice("Choose an image file for the artwork.");
+      return;
+    }
+    try {
+      const bitmap = await createImageBitmap(file);
+      const canvas = document.createElement("canvas");
+      const maxSize = 256;
+      const scale = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
+      canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+      canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("Image editing canvas is not available.");
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+      bitmap.close();
+      setCustomArtworkData(canvas.toDataURL("image/jpeg", 0.75));
+    } catch (error) {
+      console.error("Unable to prepare custom song artwork:", error);
+      setImportNotice("Could not use that image. Try another image file.");
+    }
+  };
+
+  const saveSongDetails = async () => {
+    if (!editingSong) return;
+    let artworkUrl: string | undefined = customArtworkData || undefined;
+    let artworkError = false;
+    if (!artworkUrl) {
+      try {
+        artworkUrl = await extractArtwork(editingSong.file);
+      } catch (error) {
+        console.error(`Unable to extract artwork for "${editingSong.file.name}":`, error);
+        artworkError = true;
+      }
+    }
+    const updatedSong: SongItem = {
+      ...editingSong,
+      name: editingSong.name.trim() || editingSong.file.name.replace(/\.[^/.]+$/, ""),
+      artist: editingSong.artist?.trim() ?? "",
+      album: editingSong.album?.trim() ?? "",
+      artworkUrl,
+      customArtworkData: customArtworkData || undefined,
+    };
+    setLocalSongs((previous) => previous.map((song) => song.file.name === updatedSong.file.name ? updatedSong : song));
+    if (currentSong?.file.name === updatedSong.file.name) setCurrentSong(updatedSong);
+    setEditingSong(null);
+    setImportNotice(artworkError
+      ? "Text details saved, but embedded artwork could not be loaded."
+      : "Song details saved.");
   };
 
   const handleMovieUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1967,6 +2830,13 @@ export default function MobileBulletproofPlayer() {
     const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
     const currentSpeedIndex = speeds.indexOf(movieSpeed);
     setMovieSpeed(speeds[(currentSpeedIndex + 1) % speeds.length]);
+    triggerHaptic("select", hapticsOn);
+  };
+
+  const cyclePlaybackSpeed = () => {
+    const speeds = [0.5, 0.75, 1, 1.25, 1.5, 2];
+    const currentSpeedIndex = speeds.indexOf(playbackSpeed);
+    setPlaybackSpeed(speeds[(currentSpeedIndex + 1) % speeds.length]);
     triggerHaptic("select", hapticsOn);
   };
 
@@ -2081,12 +2951,161 @@ export default function MobileBulletproofPlayer() {
 
   const coverflowActiveIndex = currentIndex;
   const isSubtitleFileSelected = Boolean(subtitleUrl);
+  const detailedNowPlayingActive = screen === "nowPlaying" && isDetailedNowPlaying;
+  const artworkLcdBackgroundActive = Boolean(
+    currentSong?.artworkUrl &&
+    (detailedNowPlayingActive || (artworkLcdBackgroundEnabled && isPlaying))
+  );
   const memoryUsageBytes = typeof performance !== "undefined"
     ? (performance as Performance & { memory?: { usedJSHeapSize: number } }).memory?.usedJSHeapSize
     : undefined;
 
+  const renderDetailedNowPlaying = () => (
+    <div className="relative isolate flex-1 min-h-0 overflow-hidden -m-4 text-white">
+      <div className="relative z-10 flex h-full min-h-0 flex-col justify-between gap-2 overflow-y-auto px-3 pt-2 pb-8">
+        <div className="flex min-h-0 flex-1 items-center gap-3">
+          <div className="relative aspect-square w-[34%] max-w-[118px] shrink-0 overflow-hidden rounded-xl border border-white/25 bg-white/10 shadow-[0_8px_24px_rgba(0,0,0,0.45)]">
+            {currentSong?.artworkUrl ? (
+              <Image
+                src={currentSong.artworkUrl}
+                alt={`${currentSong.name} artwork`}
+                fill
+                sizes="118px"
+                unoptimized
+                className="object-cover"
+              />
+            ) : (
+              <div className="flex h-full w-full items-center justify-center text-white/70"><Music size={36} /></div>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-sm font-extrabold leading-tight sm:text-base">{currentSong?.name ?? "No Track Selected"}</p>
+            <p className="mt-1 truncate text-[9px] font-medium uppercase tracking-[0.15em] text-white/65">{currentSong?.artist || "Local music library"}</p>
+            <div className="mt-3 flex items-center gap-2">
+              <span className="text-[9px] tabular-nums text-white/75">{formatTime(unifiedCurrentTime)}</span>
+              <input
+                type="range"
+                min={0}
+                max={unifiedDuration || 0}
+                step={0.1}
+                value={Math.min(unifiedCurrentTime, unifiedDuration || 0)}
+                onChange={(event) => {
+                  const nextTime = Number(event.target.value);
+                  if (audioRef.current) audioRef.current.currentTime = nextTime;
+                  setCurrentTime(nextTime);
+                }}
+                aria-label="Song progress"
+                className="min-w-0 flex-1 accent-white"
+              />
+              <span className="text-[9px] tabular-nums text-white/75">-{formatTime(Math.max(0, unifiedDuration - unifiedCurrentTime))}</span>
+            </div>
+          </div>
+        </div>
+
+        {renderRadioControls()}
+
+        <div className="mb-3 flex shrink-0 items-center justify-center gap-3 border-t border-white/15 pt-2">
+          <button
+            type="button"
+            aria-label={`Shuffle ${shuffleOn ? "on" : "off"}`}
+            onClick={() => {
+              toggleShuffle();
+              triggerHaptic("select", hapticsOn);
+            }}
+            className={`rounded-full p-2 ${shuffleOn ? "bg-white/20 text-white" : "text-white/65"}`}
+          >
+            <Shuffle size={16} />
+          </button>
+          <button type="button" onClick={handlePrevSong} aria-label="Previous song" className="rounded-full p-2 text-white/85">
+            <SkipBack size={19} />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              wakeUpAudioCtx();
+              setIsPlaying((previous) => !previous);
+            }}
+            aria-label={unifiedIsPlaying ? "Pause song" : "Play song"}
+            className="flex h-10 w-10 items-center justify-center rounded-full bg-white text-black shadow-lg"
+          >
+            {unifiedIsPlaying ? <Pause size={19} fill="currentColor" /> : <Play size={19} fill="currentColor" className="ml-0.5" />}
+          </button>
+          <button type="button" onClick={handleNextSong} aria-label="Next song" className="rounded-full p-2 text-white/85">
+            <SkipForward size={19} />
+          </button>
+          <button
+            type="button"
+            aria-label={`Repeat ${repeatMode}`}
+            onClick={() => {
+              cycleRepeat();
+              triggerHaptic("select", hapticsOn);
+            }}
+            className={`flex items-center gap-1 rounded-full p-2 text-[8px] font-bold ${repeatMode !== "off" ? "bg-white/20 text-white" : "text-white/65"}`}
+          >
+            {repeatMode === "one" ? <Repeat1 size={16} /> : <Repeat size={16} />}
+            <span>{repeatMode.toUpperCase()}</span>
+          </button>
+          {currentSong && (
+            <button
+              type="button"
+              onClick={() => toggleFavorite(currentSong)}
+              aria-label={favoriteSongNames.includes(currentSong.file.name) ? "Remove from favorites" : "Add to favorites"}
+              className={`rounded-full p-2 ${favoriteSongNames.includes(currentSong.file.name) ? "text-rose-300" : "text-white/65"}`}
+            >
+              <Heart size={16} className={favoriteSongNames.includes(currentSong.file.name) ? "fill-current" : ""} />
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
   return (
-<div className="fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 p-3 pt-[max(3rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]">      {/* --- Secret Developer Diagnostics HUD --- */}
+<div className={`fixed inset-0 w-screen h-[100dvh] bg-[#1c1c1e] text-gray-200 font-sans flex flex-col overflow-hidden select-none touch-none z-50 p-3 pt-[max(3rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))] ${largeTextEnabled ? "retro-large-text" : ""} ${highContrastEnabled ? "retro-high-contrast" : ""} ${reducedMotionEnabled ? "retro-reduced-motion" : ""}`}>
+      <input type="file" ref={customArtworkInputRef} className="hidden" accept="image/*" onChange={handleCustomArtworkUpload} />
+      {editingSong && (
+        <div className="absolute inset-0 z-[130] flex items-center justify-center bg-black/75 p-5 backdrop-blur-sm" onClick={() => setEditingSong(null)}>
+          <form
+            className="w-full max-w-sm space-y-3 rounded-2xl border border-white/20 bg-zinc-900 p-5 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={(event) => { event.preventDefault(); void saveSongDetails(); }}
+          >
+            <h2 className="text-lg font-bold">Edit song details</h2>
+            <div className="flex items-center gap-3">
+              {customArtworkData || editingSong.artworkUrl
+                ? <Image src={customArtworkData || editingSong.artworkUrl || ""} alt="" width={64} height={64} unoptimized className="h-16 w-16 rounded-lg object-cover" />
+                : <div className="flex h-16 w-16 items-center justify-center rounded-lg bg-white/10"><Music size={24} /></div>}
+              <button type="button" onClick={() => customArtworkInputRef.current?.click()} className="rounded-lg border border-white/20 px-3 py-2 text-sm">Choose artwork</button>
+            </div>
+            <label className="block text-xs font-semibold">Title
+              <input value={editingSong.name} onChange={(event) => setEditingSong({ ...editingSong, name: event.target.value })} className="mt-1 w-full rounded-lg bg-black/40 px-3 py-2 text-base outline-none ring-white/30 focus:ring-2" maxLength={180} />
+            </label>
+            <label className="block text-xs font-semibold">Artist
+              <input value={editingSong.artist ?? ""} onChange={(event) => setEditingSong({ ...editingSong, artist: event.target.value })} className="mt-1 w-full rounded-lg bg-black/40 px-3 py-2 text-base outline-none ring-white/30 focus:ring-2" maxLength={120} />
+            </label>
+            <label className="block text-xs font-semibold">Album
+              <input value={editingSong.album ?? ""} onChange={(event) => setEditingSong({ ...editingSong, album: event.target.value })} className="mt-1 w-full rounded-lg bg-black/40 px-3 py-2 text-base outline-none ring-white/30 focus:ring-2" maxLength={120} />
+            </label>
+            <div className="flex justify-end gap-2 pt-1">
+              <button type="button" onClick={() => setEditingSong(null)} className="rounded-lg px-3 py-2 text-sm opacity-75">Cancel</button>
+              <button type="submit" className="rounded-lg bg-white px-4 py-2 text-sm font-bold text-black">Save</button>
+            </div>
+          </form>
+        </div>
+      )}
+      {(importProgress || importNotice) && (
+        <div role="status" className="absolute left-1/2 top-[max(3.5rem,env(safe-area-inset-top))] z-[120] w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-xl border border-white/20 bg-zinc-950/95 p-3 text-sm shadow-xl">
+          <div className="flex items-center justify-between gap-3">
+            <span className="min-w-0 flex-1 truncate">
+              {importProgress ? `Importing ${importProgress.current}/${importProgress.total}: ${importProgress.fileName}` : importNotice}
+            </span>
+            {queueUndo && <button type="button" onClick={undoQueueRemoval} className="font-bold underline">Undo</button>}
+            {!importProgress && <button type="button" aria-label="Dismiss notification" onClick={() => setImportNotice(null)}><X size={16} /></button>}
+          </div>
+          {importProgress && <progress className="mt-2 h-1.5 w-full accent-white" value={importProgress.current} max={importProgress.total} />}
+        </div>
+      )}
+      {/* --- Secret Developer Diagnostics HUD --- */}
       {showDiag && (
         <div className="absolute top-2 left-1/2 -translate-x-1/2 bg-black/90 border border-green-500 text-green-400 text-[10px] p-3 rounded-lg z-[100] font-mono shadow-[0_0_20px_rgba(0,255,0,0.2)] w-3/4 max-w-xs">
           <p className="font-bold border-b border-green-500/50 pb-1 mb-2 text-center uppercase tracking-widest">Diagnostics</p>
@@ -2103,45 +3122,73 @@ export default function MobileBulletproofPlayer() {
           <div className="bg-[#27272a] border border-[#3f3f46] p-6 rounded-3xl max-w-sm w-full shadow-2xl flex flex-col max-h-[85vh]">
             <h2 className="text-xl font-bold text-white mb-4 uppercase tracking-widest text-center border-b border-gray-600 pb-3">RetroPod Manual</h2>
             
-            <div className="overflow-y-auto flex-1 pr-2 space-y-6 text-left text-sm text-gray-300 custom-scrollbar pb-4">
-              
-              <section>
-                <h3 className="text-blue-400 font-bold mb-2 uppercase tracking-wider text-xs flex items-center gap-2"><span className="text-base">🧭</span> Navigation</h3>
-                <ul className="space-y-2 text-xs leading-relaxed">
-                  <li>• <b>Trackpad:</b> Drag in circles to scroll through menus and lists.</li>
-                  <li>• <b>Center Button:</b> Click to select items or toggle Play/Pause.</li>
-                  <li>• <b>Menu Button:</b> Click to go back to the previous screen.</li>
-                  <li>• <b>Direct Touch:</b> You can tap menu items directly on the screen!</li>
-                  <li>• <b>Library:</b> Use the heart to save favorites and the list-plus button to queue a song. Queued songs play next.</li>
-                  <li>• <b>Movies:</b> Import downloaded videos, load VTT/SRT subtitles, and swipe the album artwork left or right to change tracks.</li>
-                </ul>
-              </section>
+            <div className="overflow-y-auto flex-1 pr-2 space-y-2 text-left text-sm text-gray-300 custom-scrollbar pb-4">
+              <p className="mb-2 text-xs leading-relaxed text-gray-400">Open a section to see its controls. RetroPod plays files stored in your local library; it does not stream songs.</p>
 
-              <section>
-                <h3 className="text-green-400 font-bold mb-2 uppercase tracking-wider text-xs flex items-center gap-2"><span className="text-base">🎵</span> Playback & Speed</h3>
-                <ul className="space-y-2 text-xs leading-relaxed">
-                  <li>• <b>Inner Ring:</b> On the &apos;Now Playing&apos; screen, drag in circles to smoothly stretch track tempo (0.5x to 2.0x).</li>
-                  <li>• <b>Double-Tap Inner:</b> Instantly reset playback speed to normal (1.0x).</li>
+              <details open className="group rounded-xl border border-white/10 bg-black/20 px-3">
+                <summary className="cursor-pointer list-none py-3 text-xs font-bold uppercase tracking-wider text-blue-300 [&::-webkit-details-marker]:hidden">🧭 Navigation &amp; Library</summary>
+                <ul className="space-y-2 pb-3 text-xs leading-relaxed">
+                  <li>• <b>Trackpad:</b> Drag in circles to move through menus and lists. You can also tap list items directly.</li>
+                  <li>• <b>Center button:</b> Select an item. In Now Playing, it opens the detailed player when enabled; there it toggles play/pause.</li>
+                  <li>• <b>MENU:</b> Return to the previous screen. In detailed Now Playing, it returns to the standard player first.</li>
+                  <li>• <b>Import:</b> Music Library → Import New Songs. Audio stays on this device.</li>
+                  <li>• <b>Favorites:</b> Tap the heart beside a song. Find saved songs under Music Library → Favorites.</li>
+                  <li>• <b>Queue:</b> Use the list button to add a song to the queue, or the skip button to make it play next. In Play Queue, move tracks up/down or remove them; removed tracks can be restored briefly with Undo.</li>
+                  <li>• <b>Artist &amp; album details:</b> RetroPod reads embedded tags when available. To add or correct them, open Music Library → All Songs (or Browse Library → Recently Added), tap the pencil beside a song, fill in Artist and Album, then Save. These details organize the Artists/Albums views and help Retro Radio make better picks.</li>
+                  <li>• <b>Edit track info:</b> Use the same pencil to update the title or choose custom artwork.</li>
                 </ul>
-              </section>
+              </details>
 
-              <section>
-                <h3 className="text-amber-400 font-bold mb-2 uppercase tracking-wider text-xs flex items-center gap-2"><span className="text-base">🎛️</span> 5-Band Equalizer</h3>
-                <ul className="space-y-2 text-xs leading-relaxed">
-                  <li>• <b>Access:</b> Go to Main Menu &gt; Playback Tools &gt; 5-Band Equalizer.</li>
-                  <li>• <b>Select Band:</b> Scroll the trackpad to highlight a frequency band.</li>
-                  <li>• <b>Adjust Gain:</b> Click the Center Button to &quot;unlock&quot; the band, then scroll the trackpad to adjust the gain (+12dB to -12dB). Click Center again to lock it in.</li>
-                  <li>• <b>Direct Touch:</b> Tap a band on-screen to select/unlock it. Tap it <i>again</i> to instantly reset its gain to 0.</li>
+              <details className="group rounded-xl border border-white/10 bg-black/20 px-3">
+                <summary className="cursor-pointer list-none py-3 text-xs font-bold uppercase tracking-wider text-fuchsia-300 [&::-webkit-details-marker]:hidden">📻 Retro Radio — offline recommendations</summary>
+                <ul className="space-y-2 pb-3 text-xs leading-relaxed">
+                  <li>• <b>Start:</b> Choose Retro Radio from the Main Menu and pick a starting song, or tap the radio icon next to a library song. You need at least two imported songs.</li>
+                  <li>• <b>A live DJ, not a playlist:</b> Radio chooses the next song only when it is needed, using the song currently playing as the new reference. It doesn&apos;t prepare a fixed shuffle list.</li>
+                  <li>• <b>Teach your station:</b> Tap <i>More like this</i> to teach it artist, album, and title-word preferences. <i>Not for me</i> skips the track for this station and lowers similar picks. Learning is saved on this device.</li>
+                  <li>• <b>Change the mood:</b> <i>Surprise me</i> favors unheard tracks and variety; Familiar mix leans harder on related metadata and your feedback. Radio explains why it picked each recommendation.</li>
+                  <li>• <b>No internet or account:</b> Recommendations are generated from your imported library and saved listening history on-device. Better artist/album metadata helps it make closer matches.</li>
+                  <li>• <b>Controls:</b> Next skips to another station track; Previous returns to an earlier station pick. Queued songs play next and then Radio continues.</li>
+                  <li>• <b>Exit:</b> Choose another song from the library to stop the station, or open Main Menu → Retro Radio → Stop Retro Radio.</li>
                 </ul>
-              </section>
+              </details>
 
-              <section>
-                <h3 className="text-fuchsia-400 font-bold mb-2 uppercase tracking-wider text-xs flex items-center gap-2"><span className="text-base">🛠️</span> Secret Diagnostics</h3>
-                <ul className="space-y-2 text-xs leading-relaxed">
-                  <li>• <b>Trigger:</b> Rapidly drag the wheel <i>backwards</i> 5 full rotations to reveal the developer HUD.</li>
+              <details className="group rounded-xl border border-white/10 bg-black/20 px-3">
+                <summary className="cursor-pointer list-none py-3 text-xs font-bold uppercase tracking-wider text-green-300 [&::-webkit-details-marker]:hidden">🎵 Playback, seeking &amp; sleep timer</summary>
+                <ul className="space-y-2 pb-3 text-xs leading-relaxed">
+                  <li>• <b>Seek:</b> Drag the progress bar to jump to a time. The configured seek jump is also used by supported keyboard and media-session seek controls.</li>
+                  <li>• <b>Playback speed:</b> Drag the inner ring to adjust speed from 0.5x to 2x. Tap the on-screen speed badge to cycle presets; double-tap the inner ring to reset to 1x.</li>
+                  <li>• <b>Shuffle &amp; repeat:</b> Use the buttons in Now Playing or change them in System Settings. Repeat can be off, repeat all, or repeat one.</li>
+                  <li>• <b>Sleep timer:</b> System Settings → Sleep Timer. Choose a timer; the optional fade gradually lowers audio near the end. Cancel it from the same menu.</li>
+                  <li>• <b>Resume:</b> Resume Last Track remembers your previous song and position on this device when enabled.</li>
                 </ul>
-              </section>
+              </details>
 
+              <details className="group rounded-xl border border-white/10 bg-black/20 px-3">
+                <summary className="cursor-pointer list-none py-3 text-xs font-bold uppercase tracking-wider text-amber-300 [&::-webkit-details-marker]:hidden">🎛️ 5-Band Equalizer</summary>
+                <ul className="space-y-2 pb-3 text-xs leading-relaxed">
+                  <li>• <b>Access:</b> Main Menu → Playback Tools → 5-Band Equalizer.</li>
+                  <li>• <b>Select and adjust:</b> Highlight a band with the trackpad, press Center to unlock, then rotate the trackpad to adjust from -12 dB to +12 dB. Press Center again to lock.</li>
+                  <li>• <b>Touch:</b> Tap a band to select/unlock it. Tap the selected band again to reset its gain to zero. Reset All clears every band.</li>
+                </ul>
+              </details>
+
+              <details className="group rounded-xl border border-white/10 bg-black/20 px-3">
+                <summary className="cursor-pointer list-none py-3 text-xs font-bold uppercase tracking-wider text-cyan-300 [&::-webkit-details-marker]:hidden">🎬 Movies &amp; subtitles</summary>
+                <ul className="space-y-2 pb-3 text-xs leading-relaxed">
+                  <li>• Import downloaded video files from Movies. Playback format support depends on the device.</li>
+                  <li>• Load VTT or SRT subtitles from the movie player controls.</li>
+                  <li>• Use the seek bar to move through a movie; the side controls skip backward or forward.</li>
+                </ul>
+              </details>
+
+              <details className="group rounded-xl border border-white/10 bg-black/20 px-3">
+                <summary className="cursor-pointer list-none py-3 text-xs font-bold uppercase tracking-wider text-violet-300 [&::-webkit-details-marker]:hidden">⚙️ Settings &amp; accessibility</summary>
+                <ul className="space-y-2 pb-3 text-xs leading-relaxed">
+                  <li>• System Settings contains LCD themes, haptics, clock format, resume behavior, seek-jump length, and player-view options.</li>
+                  <li>• Accessibility lets you enable larger text, high contrast, or reduced motion.</li>
+                  <li>• Your library, playlists, favorites, and preferences are stored locally on this device.</li>
+                </ul>
+              </details>
             </div>
             
             <div className="pt-4 border-t border-gray-600 mt-2">
@@ -2166,7 +3213,17 @@ export default function MobileBulletproofPlayer() {
       <div className="w-full h-[42%] p-1 pb-2 flex flex-col shrink-0">
         <div className="w-full h-full bg-[#27272a] rounded-[2rem] p-3 shadow-[0_20px_40px_rgba(0,0,0,0.5),inset_0_1px_2px_rgba(255,255,255,0.1)] border border-[#3f3f46] flex flex-col relative">
           
-          <div className={`w-full h-full bg-gradient-to-b ${theme.bg} rounded-xl relative overflow-hidden shadow-[inset_0_4px_15px_rgba(0,0,0,0.5)] border border-[#1a1a1a] flex flex-col p-4 ${theme.text}`}>
+          <div className={`w-full h-full ${artworkLcdBackgroundActive ? "bg-black text-white" : `bg-gradient-to-b ${theme.bg} ${theme.text}`} rounded-xl relative overflow-hidden shadow-[inset_0_4px_15px_rgba(0,0,0,0.5)] border border-[#1a1a1a] flex flex-col p-4`}>
+            {artworkLcdBackgroundActive && currentSong?.artworkUrl && (
+              <>
+                <div
+                  aria-hidden="true"
+                  className="absolute -inset-8 z-0 scale-110 bg-cover bg-center blur-xl opacity-90"
+                  style={{ backgroundImage: `url("${currentSong.artworkUrl}")` }}
+                />
+                <div aria-hidden="true" className="absolute inset-0 z-0 bg-gradient-to-br from-black/25 via-black/45 to-black/70" />
+              </>
+            )}
 
             {/* --- VOLUME HUD OVERLAY --- */}
             <AnimatePresence>
@@ -2186,7 +3243,7 @@ export default function MobileBulletproofPlayer() {
             </AnimatePresence>
 
             <div className={`flex justify-between items-center text-[11px] font-bold tracking-[0.15em] border-b ${theme.border}/30 pb-2 mb-3 uppercase relative z-10`}>
-              <span>{screen === "nowPlaying" ? "Now Playing" : screen === "eq" ? "Equalizer" : screen === "movies" ? "Movies" : screen === "moviePlaying" ? currentMovie?.name ?? "Movie" : currentMenu.title}</span>
+              <span>{screen === "nowPlaying" ? radioModeOn ? "Retro Radio" : "Now Playing" : screen === "eq" ? "Equalizer" : screen === "movies" ? "Movies" : screen === "moviePlaying" ? currentMovie?.name ?? "Movie" : currentMenu.title}</span>
               
               <div className="flex items-center gap-1.5">
                 <span className="tracking-normal normal-case">{currentTimeStr}</span>
@@ -2271,10 +3328,35 @@ export default function MobileBulletproofPlayer() {
                         selectedIndex === index ? `${theme.selectedBg} ${theme.selectedText}` : ""
                       }`}
                     >
-                      <span className="truncate min-w-0">{item.label}</span>
+                      <span className="min-w-0 flex-1 truncate">{item.label}</span>
                       <div className="flex items-center gap-2 shrink-0">
                         {item.type === "song" && item.song && (
                           <>
+                            {currentMenuId === "browse_most_played" && (
+                              <span
+                                className={`rounded-full px-2 py-0.5 text-[9px] font-bold tabular-nums ${
+                                  selectedIndex === index ? "bg-white/15" : "bg-black/15"
+                                }`}
+                                aria-label={`${item.song.playCount ?? 0} plays`}
+                                title={`${item.song.playCount ?? 0} plays`}
+                              >
+                                {item.song.playCount ?? 0} plays
+                              </span>
+                            )}
+                            {currentMenuId !== "queue" && (
+                              <button
+                                type="button"
+                                aria-label={`Start Retro Radio from ${item.song.name}`}
+                                title="Start offline Retro Radio from this song"
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  startRadioFrom(item.song!);
+                                }}
+                                className="p-1 rounded hover:bg-black/20"
+                              >
+                                <Radio size={14} />
+                              </button>
+                            )}
                             <button
                               type="button"
                               aria-label={favoriteSongNames.includes(item.song.file.name) ? `Remove ${item.song.name} from favorites` : `Add ${item.song.name} to favorites`}
@@ -2304,34 +3386,58 @@ export default function MobileBulletproofPlayer() {
                                 <X size={14} />
                               </button>
                             ) : currentMenuId === "queue" ? (
-                              <button
-                                type="button"
-                                aria-label={`Remove ${item.song.name} from queue`}
-                                title="Remove from queue"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  removeQueuedSong(item.song!.file.name);
-                                }}
-                                className="p-1 rounded hover:bg-black/20"
-                              >
-                                <X size={14} />
-                              </button>
+                              <>
+                                <button type="button" aria-label={`Move ${item.song.name} earlier`} title="Move earlier" disabled={queuedSongNames.indexOf(item.song.file.name) <= 0} onClick={(event) => { event.stopPropagation(); moveQueuedSong(item.song!.file.name, -1); }} className="p-1 rounded hover:bg-black/20 disabled:opacity-30"><ArrowUp size={14} /></button>
+                                <button type="button" aria-label={`Move ${item.song.name} later`} title="Move later" disabled={queuedSongNames.indexOf(item.song.file.name) >= queuedSongNames.length - 1} onClick={(event) => { event.stopPropagation(); moveQueuedSong(item.song!.file.name, 1); }} className="p-1 rounded hover:bg-black/20 disabled:opacity-30"><ArrowDown size={14} /></button>
+                                <button
+                                  type="button"
+                                  aria-label={`Remove ${item.song.name} from queue`}
+                                  title="Remove from queue"
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    removeQueuedSong(item.song!.file.name);
+                                  }}
+                                  className="p-1 rounded hover:bg-black/20"
+                                >
+                                  <X size={14} />
+                                </button>
+                              </>
                             ) : (
-                              <button
-                                type="button"
-                                aria-label={`Add ${item.song.name} to queue`}
-                                title={queuedSongNames.includes(item.song.file.name) ? "Already queued" : "Add to queue"}
-                                disabled={queuedSongNames.includes(item.song.file.name)}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  enqueueSong(item.song!);
-                                }}
-                                className="p-1 rounded hover:bg-black/20 disabled:opacity-40"
-                              >
-                                <ListPlus size={14} />
-                              </button>
+                              <>
+                                <button type="button" aria-label={`Play ${item.song.name} next`} title="Play next" onClick={(event) => { event.stopPropagation(); playSongNext(item.song!); }} className="p-1 rounded hover:bg-black/20"><SkipForward size={14} /></button>
+                                <button
+                                  type="button"
+                                  aria-label={`Add ${item.song.name} to queue`}
+                                  title={queuedSongNames.includes(item.song.file.name) ? "Already queued" : "Add to queue"}
+                                  disabled={queuedSongNames.includes(item.song.file.name)}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    enqueueSong(item.song!);
+                                  }}
+                                  className="p-1 rounded hover:bg-black/20 disabled:opacity-40"
+                                >
+                                  <ListPlus size={14} />
+                                </button>
+                                {(currentMenuId === "local_songs" || currentMenuId.startsWith("browse_")) && (
+                                  <button type="button" aria-label={`Edit ${item.song.name}`} title="Edit song details" onClick={(event) => { event.stopPropagation(); setEditingSong(item.song!); setCustomArtworkData(item.song!.customArtworkData ?? ""); }} className="p-1 rounded hover:bg-black/20"><Pencil size={14} /></button>
+                                )}
+                              </>
                             )}
                           </>
+                        )}
+                        {item.actionId === "start_radio_song" && item.song && (
+                          <button
+                            type="button"
+                            aria-label={`Start Retro Radio from ${item.song.name}`}
+                            title="Start station from this song"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              startRadioFrom(item.song!);
+                            }}
+                            className="p-1 rounded hover:bg-black/20"
+                          >
+                            <Radio size={14} />
+                          </button>
                         )}
                         {item.type === "menu" && <span>&gt;</span>}
                       </div>
@@ -2548,137 +3654,139 @@ export default function MobileBulletproofPlayer() {
                   <span>{eqEditMode ? "Adjusting Gain..." : "Select Band"}</span>
                 </div>
               </div>
+            ) : screen === "nowPlaying" && isDetailedNowPlaying ? (
+              renderDetailedNowPlaying()
             ) : (
-              <div className="flex-1 flex flex-col items-center justify-center relative z-10 overflow-hidden">
+              <div className={`flex-1 flex flex-col items-center relative z-10 overflow-hidden ${radioModeOn ? "justify-start pt-1" : "justify-center"}`}>
                 <div
-                  className="relative w-full flex items-center justify-center h-24 mb-2 touch-pan-y"
+                  className={`relative w-full flex shrink-0 items-center justify-center touch-pan-y ${radioModeOn ? "h-16 mb-1" : "h-24 mb-2"}`}
                   onPointerDown={handleCoverSwipeStart}
                   onPointerUp={handleCoverSwipeEnd}
                   onPointerCancel={() => { coverSwipeStartXRef.current = null; }}
                 >
-                  <AlbumCoverflow
-                    items={activeCoverflowItems}
-                    activeIndex={coverflowActiveIndex}
-                    isPlaying={unifiedIsPlaying}
-                  />
+                  {radioModeOn && currentSong ? (
+                    <div className="relative h-[60px] w-[60px] shrink-0 overflow-hidden rounded-lg border border-white/30 bg-black/25 shadow-[0_6px_18px_rgba(0,0,0,0.4)]">
+                      {currentSong.artworkUrl ? (
+                        <Image
+                          src={currentSong.artworkUrl}
+                          alt={`${currentSong.name} artwork`}
+                          fill
+                          sizes="60px"
+                          unoptimized
+                          className="object-contain"
+                        />
+                      ) : (
+                        <div className="flex h-full w-full items-center justify-center text-white/60"><Music size={32} /></div>
+                      )}
+                    </div>
+                  ) : (
+                    <AlbumCoverflow
+                      items={activeCoverflowItems}
+                      activeIndex={coverflowActiveIndex}
+                      isPlaying={unifiedIsPlaying}
+                    />
+                  )}
                 </div>
 
-                <p className="font-bold text-base md:text-lg tracking-wide text-center leading-tight truncate w-full px-4">
+                <p className={`w-full shrink-0 truncate px-4 text-center font-bold tracking-wide leading-tight ${radioModeOn ? "text-sm" : "text-base md:text-lg"}`}>
                   {unifiedTrackName}
                 </p>
+                {renderRadioControls(true)}
                 
-              <div className="w-full mt-4 flex items-center gap-3 px-2">
-  <span className="text-[10px] font-bold tracking-wider">
-    {formatTime(unifiedCurrentTime)}
-  </span>
+                <div className={`w-full shrink-0 flex items-center gap-3 px-2 ${radioModeOn ? "mt-1" : "mt-4"}`}>
+                  <span className="text-[10px] font-bold tracking-wider">
+                    {formatTime(unifiedCurrentTime)}
+                  </span>
+                  <div
+                    className="flex-1 h-[14px] flex items-center cursor-pointer touch-none"
+                    role="slider"
+                    aria-label="Song progress"
+                    aria-valuemin={0}
+                    aria-valuemax={unifiedDuration}
+                    aria-valuenow={unifiedCurrentTime}
+                    aria-valuetext={`${formatTime(unifiedCurrentTime)} of ${formatTime(unifiedDuration)}`}
+                    tabIndex={0}
+                    onKeyDown={(event) => {
+                      if (!audioRef.current || unifiedDuration <= 0) return;
+                      const seekStep = seekJumpSeconds * (event.shiftKey ? 3 : 1);
+                      const targetTime = event.key === "ArrowRight"
+                        ? Math.min(unifiedDuration, audioRef.current.currentTime + seekStep)
+                        : event.key === "ArrowLeft"
+                        ? Math.max(0, audioRef.current.currentTime - seekStep)
+                        : event.key === "Home"
+                        ? 0
+                        : event.key === "End"
+                        ? unifiedDuration
+                        : null;
+                      if (targetTime === null) return;
+                      event.preventDefault();
+                      event.stopPropagation();
+                      audioRef.current.currentTime = targetTime;
+                      setCurrentTime(targetTime);
+                    }}
+                    onPointerDown={(event) => {
+                      event.stopPropagation();
+                      if (!audioRef.current || unifiedDuration <= 0) return;
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+                      const nextTime = ratio * unifiedDuration;
+                      audioRef.current.currentTime = nextTime;
+                      setCurrentTime(nextTime);
+                      event.currentTarget.setPointerCapture(event.pointerId);
+                    }}
+                    onPointerMove={(event) => {
+                      event.stopPropagation();
+                      if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
+                      if (!audioRef.current || unifiedDuration <= 0) return;
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+                      const nextTime = ratio * unifiedDuration;
+                      audioRef.current.currentTime = nextTime;
+                      setCurrentTime(nextTime);
+                    }}
+                    onPointerUp={(event) => {
+                      event.stopPropagation();
+                      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                        event.currentTarget.releasePointerCapture(event.pointerId);
+                      }
+                    }}
+                    onPointerCancel={(event) => {
+                      event.stopPropagation();
+                      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                        event.currentTarget.releasePointerCapture(event.pointerId);
+                      }
+                    }}
+                  >
+                    <div className="w-full h-[4px] rounded-sm overflow-visible relative bg-current opacity-20">
+                      <div
+                        className="absolute top-0 left-0 h-full bg-current opacity-100"
+                        style={{ width: `${Math.min(100, Math.max(0, unifiedProgress))}%` }}
+                      />
+                      <div
+                        className="absolute top-1/2 -translate-y-1/2 w-[10px] h-[10px] rounded-full bg-current"
+                        style={{ left: `calc(${Math.min(100, Math.max(0, unifiedProgress))}% - 5px)` }}
+                      />
+                    </div>
+                  </div>
+                  <span className="text-[10px] font-bold tracking-wider">
+                    -{formatTime(Math.max(0, unifiedDuration - unifiedCurrentTime))}
+                  </span>
+                </div>
 
-  <div
-    className="flex-1 h-[14px] flex items-center cursor-pointer touch-none"
-    role="slider"
-    aria-label="Song progress"
-    aria-valuemin={0}
-    aria-valuemax={unifiedDuration}
-    aria-valuenow={unifiedCurrentTime}
-    aria-valuetext={`${formatTime(unifiedCurrentTime)} of ${formatTime(unifiedDuration)}`}
-    tabIndex={0}
-    onKeyDown={(event) => {
-      if (!audioRef.current || unifiedDuration <= 0) return;
-      const seekStep = event.shiftKey ? 30 : 5;
-      const targetTime = event.key === "ArrowRight"
-        ? Math.min(unifiedDuration, audioRef.current.currentTime + seekStep)
-        : event.key === "ArrowLeft"
-        ? Math.max(0, audioRef.current.currentTime - seekStep)
-        : event.key === "Home"
-        ? 0
-        : event.key === "End"
-        ? unifiedDuration
-        : null;
-      if (targetTime === null) return;
-      event.preventDefault();
-      event.stopPropagation();
-      audioRef.current.currentTime = targetTime;
-      setCurrentTime(targetTime);
-    }}
-    onPointerDown={(e) => {
-      e.stopPropagation();
-
-      if (!audioRef.current || unifiedDuration <= 0) return;
-
-      const rect = e.currentTarget.getBoundingClientRect();
-      const ratio = Math.max(
-        0,
-        Math.min(1, (e.clientX - rect.left) / rect.width)
-      );
-
-      const nextTime = ratio * unifiedDuration;
-
-      audioRef.current.currentTime = nextTime;
-      setCurrentTime(nextTime);
-
-      e.currentTarget.setPointerCapture(e.pointerId);
-    }}
-    onPointerMove={(e) => {
-      e.stopPropagation();
-
-      if (!e.currentTarget.hasPointerCapture(e.pointerId)) return;
-      if (!audioRef.current || unifiedDuration <= 0) return;
-
-      const rect = e.currentTarget.getBoundingClientRect();
-      const ratio = Math.max(
-        0,
-        Math.min(1, (e.clientX - rect.left) / rect.width)
-      );
-
-      const nextTime = ratio * unifiedDuration;
-
-      audioRef.current.currentTime = nextTime;
-      setCurrentTime(nextTime);
-    }}
-    onPointerUp={(e) => {
-      e.stopPropagation();
-
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      }
-    }}
-    onPointerCancel={(e) => {
-      e.stopPropagation();
-
-      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
-        e.currentTarget.releasePointerCapture(e.pointerId);
-      }
-    }}
-  >
-    <div className="w-full h-[4px] rounded-sm overflow-visible relative bg-current opacity-20">
-      <div
-        className="absolute top-0 left-0 h-full bg-current opacity-100"
-        style={{
-          width: `${Math.min(100, Math.max(0, unifiedProgress))}%`,
-        }}
-      />
-
-      <div
-        className="absolute top-1/2 -translate-y-1/2 w-[10px] h-[10px] rounded-full bg-current"
-        style={{
-          left: `calc(${Math.min(
-            100,
-            Math.max(0, unifiedProgress)
-          )}% - 5px)`,
-        }}
-      />
-    </div>
-  </div>
-
-  <span className="text-[10px] font-bold tracking-wider">
-    -{formatTime(Math.max(0, unifiedDuration - unifiedCurrentTime))}
-  </span>
-</div>
-
-                <div className="mt-3 flex items-center gap-3 text-[9px] font-bold tracking-widest uppercase">
-                  <div className={`flex items-center gap-1.5 px-2 py-0.5 border-[1.5px] ${theme.border} rounded-sm`}>
+                <div className={`${radioModeOn ? "mt-1" : "mt-3"} flex shrink-0 items-center gap-3 text-[9px] font-bold tracking-widest uppercase`}>
+                  <button
+                    type="button"
+                    aria-label={`Playback speed ${playbackSpeed}x. Tap to change speed`}
+                    title="Tap to change playback speed"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      cyclePlaybackSpeed();
+                    }}
+                    className={`flex items-center gap-1.5 px-2 py-1 border-[1.5px] ${theme.border} rounded-sm touch-manipulation active:scale-95`}
+                  >
                     <RefreshCw size={10} strokeWidth={3} />
                     <span>{playbackSpeed}x</span>
-                  </div>
+                  </button>
                   <button
                     type="button"
                     aria-label={`Shuffle ${shuffleOn ? "on" : "off"}`}
@@ -2735,7 +3843,9 @@ export default function MobileBulletproofPlayer() {
               onClick={handleCenterClick}
               className="w-[70%] aspect-square rounded-full bg-[#18181a] border border-black flex items-center justify-center cursor-pointer pointer-events-auto shadow-[0_5px_15px_rgba(0,0,0,0.8),inset_0_1px_1px_rgba(255,255,255,0.05)] transition-all group"
             >
-              {screen === "nowPlaying" ? (
+              {screen === "nowPlaying" && detailedViewEnabled && currentSong && !isDetailedNowPlaying ? (
+                <Music size={20} className="text-gray-500 group-active:text-white" />
+              ) : screen === "nowPlaying" ? (
                 unifiedIsPlaying ? <Pause size={20} className="text-gray-500 group-active:text-white"/> : <Play size={20} className="ml-1 text-gray-500 group-active:text-white"/>
               ) : (
                 <div className="w-3 h-3 rounded-full bg-gray-600/30 group-active:bg-white shadow-[inset_0_1px_2px_rgba(0,0,0,0.8)] transition-colors"></div>
@@ -2752,6 +3862,7 @@ export default function MobileBulletproofPlayer() {
           
           <button 
             onClick={handleGlobalPlayPause}
+            aria-label={unifiedIsPlaying ? "Pause playback" : "Resume playback"}
             className="absolute bottom-[8%] text-gray-600 hover:text-white cursor-pointer pointer-events-auto z-20 transition-colors p-2"
           >
             {unifiedIsPlaying ? <Pause size={18}/> : <Play size={18} className="inline"/>}

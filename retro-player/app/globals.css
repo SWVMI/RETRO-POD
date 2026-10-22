@@ -28,3 +28,29 @@ body {
   overflow: hidden;
   overscroll-behavior: none;
 }
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.retro-large-text :is(p, span, button, label, input, li) {
+  font-size: max(1em, 1.12em);
+}
+
+.retro-high-contrast {
+  filter: contrast(1.2);
+}
+
+.retro-reduced-motion *,
+.retro-reduced-motion *::before,
+.retro-reduced-motion *::after {
+  scroll-behavior: auto !important;
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+}

@@ -25,6 +25,10 @@
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 
+        <receiver
+            android:name=".MediaActionReceiver"
+            android:exported="false" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
