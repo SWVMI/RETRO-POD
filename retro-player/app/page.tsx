@@ -111,11 +111,14 @@ export default function MobileBulletproofPlayer() {
 
   // References
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const seekPreviewRef = useRef(0);
+  const seekAudioToRef = useRef<(position: number) => void>(() => {});
   const audioCtxRef = useRef<AudioContext | null>(null);
   const sourceNodeRef = useRef<MediaElementAudioSourceNode | null>(null);
   const filtersRef = useRef<BiquadFilterNode[]>([]);
   const audioObjectUrlRef = useRef<string | null>(null);
   const playbackRequestRef = useRef(0);
+  const nativeTrackSyncsRef = useRef(new Map<string, Promise<void>>());
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const movieStageRef = useRef<HTMLDivElement | null>(null);
   const movieInputRef = useRef<HTMLInputElement>(null);
@@ -270,6 +273,51 @@ export default function MobileBulletproofPlayer() {
     }
   };
 
+  const syncNativeTrack = (song: SongItem): Promise<void> => {
+    if (Capacitor.getPlatform() !== "android") return Promise.resolve();
+    const existingSync = nativeTrackSyncsRef.current.get(song.file.name);
+    if (existingSync) return existingSync;
+
+    const sync = (async () => {
+      const status = await AndroidPlayback.hasTrack({
+        name: song.file.name,
+        size: song.file.size,
+        lastModified: song.file.lastModified,
+      });
+      if (status.exists) return;
+
+      const chunkSize = 256 * 1024;
+      const chunkCount = Math.ceil(song.file.size / chunkSize);
+      if (chunkCount === 0) throw new Error(`"${song.file.name}" is empty.`);
+      for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+        const start = chunkIndex * chunkSize;
+        const bytes = new Uint8Array(await song.file.slice(start, start + chunkSize).arrayBuffer());
+        let binary = "";
+        for (let offset = 0; offset < bytes.length; offset += 1) {
+          binary += String.fromCharCode(bytes[offset]);
+        }
+        await AndroidPlayback.appendTrackChunk({
+          name: song.file.name,
+          chunk: btoa(binary),
+          first: chunkIndex === 0,
+          last: chunkIndex === chunkCount - 1,
+          size: song.file.size,
+          lastModified: song.file.lastModified,
+          title: song.name,
+          artist: song.artist ?? "",
+          album: song.album ?? "",
+        });
+      }
+    })();
+    nativeTrackSyncsRef.current.set(song.file.name, sync);
+    void sync.finally(() => nativeTrackSyncsRef.current.delete(song.file.name)).catch(() => {});
+    return sync;
+  };
+
+  const syncNativeLibrary = async (songs: SongItem[]) => {
+    for (const song of songs) await syncNativeTrack(song);
+  };
+
   const setAudioSource = (file: File) => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -282,6 +330,24 @@ export default function MobileBulletproofPlayer() {
     audio.src = audioObjectUrlRef.current;
     audio.load();
   };
+
+  const seekAudioTo = (position: number) => {
+    const audioDuration = audioRef.current?.duration;
+    const maximum = Number.isFinite(audioDuration) && audioDuration
+      ? audioDuration
+      : duration;
+    const boundedPosition = Math.max(0, Math.min(position, maximum || position));
+    setCurrentTime(boundedPosition);
+    if (Capacitor.getPlatform() === "android") {
+      AndroidPlayback.seekTo({ position: Math.round(boundedPosition * 1000) }).catch((error) => {
+        console.error("Unable to seek Android playback:", error);
+        setImportNotice("The track could not seek to that position.");
+      });
+    } else if (audioRef.current) {
+      audioRef.current.currentTime = boundedPosition;
+    }
+  };
+  seekAudioToRef.current = seekAudioTo;
 
   const releaseAudioSource = () => {
     playbackRequestRef.current += 1;
@@ -504,6 +570,12 @@ export default function MobileBulletproofPlayer() {
       const validQueue = queuedSongNamesRef.current.filter((name) => availableFileNames.has(name));
       queuedSongNamesRef.current = validQueue;
       setQueuedSongNames(validQueue);
+      if (Capacitor.getPlatform() === "android") {
+        void syncNativeLibrary(loadedSongs).catch((error) => {
+          console.error("Unable to prepare imported tracks for Android background playback:", error);
+          setImportNotice("Android background playback could not prepare every saved track. Re-import affected songs and try again.");
+        });
+      }
       const lastSongName = resumePlaybackEnabledRef.current ? localStorage.getItem("retro_last_song_name") : null;
       if (lastSongName) {
         const foundIdx = loadedSongs.findIndex(s => s.name === lastSongName);
@@ -511,7 +583,7 @@ export default function MobileBulletproofPlayer() {
           setCurrentSong(loadedSongs[foundIdx]);
           currentIndexRef.current = foundIdx;
           setCurrentIndex(foundIdx);
-          if (audioRef.current) {
+          if (audioRef.current && Capacitor.getPlatform() !== "android") {
             setAudioSource(loadedSongs[foundIdx].file);
             audioRef.current.addEventListener('loadedmetadata', function restoreTime() {
               const lastTime = parseFloat(localStorage.getItem("retro_last_time") || "0");
@@ -570,6 +642,16 @@ export default function MobileBulletproofPlayer() {
   };
 
   const clearLocalLibrary = async () => {
+    if (Capacitor.getPlatform() === "android") {
+      try {
+        await Promise.all(localSongsRef.current.map((song) =>
+          AndroidPlayback.removeTrack({ name: song.file.name })
+        ));
+      } catch (error) {
+        console.error("Unable to clear Android's background music copies:", error);
+        setImportNotice("Some Android background music copies could not be removed.");
+      }
+    }
     try {
       const root = await navigator.storage.getDirectory() as DirectoryHandleWithIteration;
       for await (const [name, handle] of root.entries()) {
@@ -592,6 +674,14 @@ export default function MobileBulletproofPlayer() {
   };
 
   const removeSpecificSong = async (fileName: string) => {
+    if (Capacitor.getPlatform() === "android") {
+      try {
+        await AndroidPlayback.removeTrack({ name: fileName });
+      } catch (error) {
+        console.error(`Unable to remove Android's background copy of "${fileName}":`, error);
+        setImportNotice("The Android background copy could not be removed.");
+      }
+    }
     try {
       const root = await navigator.storage.getDirectory();
       await root.removeEntry(fileName);
@@ -650,6 +740,46 @@ export default function MobileBulletproofPlayer() {
       .filter((song): song is SongItem => song !== undefined);
   };
 
+  const startNativeQueue = async (song: SongItem, songIndex: number, playlistId: string | null) => {
+    const playbackSongs = getPlaybackSongs();
+    const playbackIndex = playbackSongs.findIndex((item) => item.file.name === song.file.name);
+    const currentPosition = playbackIndex >= 0 ? playbackIndex : songIndex;
+    const queuedSongs = playlistId
+      ? []
+      : queuedSongNamesRef.current
+        .map((name) => localSongsRef.current.find((item) => item.file.name === name))
+        .filter((item): item is SongItem => item !== undefined && item.file.name !== song.file.name);
+    const queuedNames = new Set(queuedSongs.map((item) => item.file.name));
+    const remainingSongs = playbackSongs
+      .slice(currentPosition + 1)
+      .concat(repeatModeRef.current === "all" ? playbackSongs.slice(0, currentPosition) : [])
+      .filter((item) => item.file.name !== song.file.name && !queuedNames.has(item.file.name));
+
+    if (shuffleOnRef.current) {
+      for (let i = remainingSongs.length - 1; i > 0; i -= 1) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [remainingSongs[i], remainingSongs[j]] = [remainingSongs[j], remainingSongs[i]];
+      }
+    }
+
+    const orderedSongs = [song, ...queuedSongs, ...remainingSongs];
+    await syncNativeLibrary(orderedSongs);
+    await AndroidPlayback.setQueue({
+      tracks: JSON.stringify(orderedSongs.map((item) => ({
+        fileName: item.file.name,
+        title: item.name,
+        artist: item.artist ?? "",
+        album: item.album ?? "",
+      }))),
+      index: 0,
+      repeatStartIndex: 1 + queuedSongs.length,
+      repeatMode: repeatModeRef.current,
+      shuffle: shuffleOnRef.current,
+      speed: playbackSpeed,
+    });
+    await AndroidPlayback.setEqualizer({ gains: JSON.stringify(eqGainsRef.current) });
+  };
+
   const playSong = (song: SongItem, index: number, playlistId: string | null = null, radioPlayback = false) => {
     if (!radioPlayback && radioModeOnRef.current) {
       radioModeOnRef.current = false;
@@ -658,7 +788,8 @@ export default function MobileBulletproofPlayer() {
       radioPositionRef.current = 0;
       radioSeedSongRef.current = null;
     }
-    if (sourceNodeRef.current || eqGainsRef.current.some((gain) => gain !== 0)) {
+    if (Capacitor.getPlatform() !== "android"
+      && (sourceNodeRef.current || eqGainsRef.current.some((gain) => gain !== 0))) {
       ensureAudioGraph();
       wakeUpAudioCtx();
     }
@@ -685,7 +816,19 @@ export default function MobileBulletproofPlayer() {
       setQueuedSongNames(nextQueue);
     }
 
-    if (audio) {
+    if (Capacitor.getPlatform() === "android") {
+      void startNativeQueue(song, index, playlistId).then(() => {
+        if (requestId !== playbackRequestRef.current) return;
+        isPlayingRef.current = true;
+        setIsPlaying(true);
+      }).catch((error) => {
+        if (requestId !== playbackRequestRef.current) return;
+        console.error("Android native playback could not start:", error);
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        setImportNotice(`Could not prepare "${song.name}" for Android playback. Re-import the track and try again.`);
+      });
+    } else if (audio) {
       setAudioSource(song.file);
       audio.playbackRate = playbackSpeed;
       audio.play().then(() => {
@@ -1313,24 +1456,66 @@ export default function MobileBulletproofPlayer() {
     latestEnsureAudioGraph.current = ensureAudioGraph;
   });
 
-  useEffect(() => {
-    const handleMediaAction = (event: Event) => {
-      const action = (event as CustomEvent<unknown>).detail;
-      if (action === "play") {
-        wakeUpAudioCtx();
-        setIsPlaying(true);
-      } else if (action === "pause") {
-        setIsPlaying(false);
-      } else if (action === "previous") {
-        latestPrevSong.current();
-      } else if (action === "next") {
-        latestNextSong.current();
-      }
-    };
+  const applyNativePlaybackState = (state: {
+    fileName?: string;
+    playing?: boolean;
+    position?: number;
+    duration?: number;
+  }) => {
+    if (typeof state.playing === "boolean") {
+      isPlayingRef.current = state.playing;
+      setIsPlaying(state.playing);
+    }
+    if (typeof state.position === "number" && Number.isFinite(state.position)) {
+      const position = Math.max(0, state.position / 1000);
+      setCurrentTime(position);
+      localStorage.setItem("retro_last_time", String(position));
+    }
+    if (typeof state.duration === "number" && Number.isFinite(state.duration)) {
+      setDuration(Math.max(0, state.duration / 1000));
+    }
+    if (!state.fileName) return;
+    const song = localSongsRef.current.find((item) => item.file.name === state.fileName);
+    if (!song) return;
+    setCurrentSong((current) => current?.file.name === song.file.name ? current : song);
+    const currentIndex = getPlaybackSongs().findIndex((item) => item.file.name === song.file.name);
+    if (currentIndex >= 0) {
+      currentIndexRef.current = currentIndex;
+      setCurrentIndex(currentIndex);
+    }
+    setScreen("nowPlaying");
+    const queued = queuedSongNamesRef.current.filter((name) => name !== song.file.name);
+    if (queued.length !== queuedSongNamesRef.current.length) {
+      queuedSongNamesRef.current = queued;
+      setQueuedSongNames(queued);
+    }
+  };
+  const applyNativePlaybackStateRef = useRef(applyNativePlaybackState);
+  applyNativePlaybackStateRef.current = applyNativePlaybackState;
 
-    window.addEventListener("retropod-media-action", handleMediaAction);
-    return () => window.removeEventListener("retropod-media-action", handleMediaAction);
+  useEffect(() => {
+    if (Capacitor.getPlatform() !== "android") return;
+    const handleNativePlaybackState = (event: Event) => {
+      const state = (event as CustomEvent<{
+        fileName?: string;
+        playing?: boolean;
+        position?: number;
+        duration?: number;
+      }>).detail;
+      applyNativePlaybackStateRef.current(state);
+    };
+    window.addEventListener("native-playback-state", handleNativePlaybackState);
+    return () => window.removeEventListener("native-playback-state", handleNativePlaybackState);
   }, []);
+
+  useEffect(() => {
+    if (!songsLoaded || Capacitor.getPlatform() !== "android") return;
+    AndroidPlayback.queryState().then((state) => {
+      applyNativePlaybackStateRef.current(state);
+    }).catch((error) => {
+      console.error("Unable to restore Android playback state:", error);
+    });
+  }, [songsLoaded]);
 
   // --- INITIALIZATION EFFECTS ---
   useEffect(() => {
@@ -1590,6 +1775,16 @@ export default function MobileBulletproofPlayer() {
   useEffect(() => { localStorage.setItem("retro_resume_playback", String(resumePlaybackEnabled)); }, [resumePlaybackEnabled]);
   useEffect(() => { localStorage.setItem("retro_seek_jump", String(seekJumpSeconds)); }, [seekJumpSeconds]);
   useEffect(() => { localStorage.setItem("retro_sleep_fade", String(sleepFadeEnabled)); }, [sleepFadeEnabled]);
+  useEffect(() => {
+    if (Capacitor.getPlatform() !== "android") return;
+    AndroidPlayback.setSleepTimer({
+      endAt: sleepTimerEndAt ?? 0,
+      fade: sleepFadeEnabled,
+    }).catch((error) => {
+      console.error("Unable to synchronize Android sleep timer:", error);
+      setImportNotice("The Android sleep timer could not be updated.");
+    });
+  }, [sleepTimerEndAt, sleepFadeEnabled]);
   useEffect(() => { localStorage.setItem("retro_large_text", String(largeTextEnabled)); }, [largeTextEnabled]);
   useEffect(() => { localStorage.setItem("retro_high_contrast", String(highContrastEnabled)); }, [highContrastEnabled]);
   useEffect(() => { localStorage.setItem("retro_reduced_motion", String(reducedMotionEnabled)); }, [reducedMotionEnabled]);
@@ -1675,8 +1870,36 @@ export default function MobileBulletproofPlayer() {
   }, []);
 
   useEffect(() => {
-    if (audioRef.current) audioRef.current.playbackRate = playbackSpeed;
-  }, [playbackSpeed]);
+    if (Capacitor.getPlatform() === "android") {
+      if (!currentSong) return;
+      AndroidPlayback.setPlaybackSpeed({ speed: playbackSpeed }).catch((error) => {
+        console.error("Unable to update Android playback speed:", error);
+      });
+    } else if (audioRef.current) {
+      audioRef.current.playbackRate = playbackSpeed;
+    }
+  }, [playbackSpeed, currentSong]);
+
+  useEffect(() => {
+    if (Capacitor.getPlatform() !== "android" || !currentSong) return;
+    AndroidPlayback.setEqualizer({ gains: JSON.stringify(eqGains) }).catch((error) => {
+      console.error("Unable to update Android equalizer:", error);
+    });
+  }, [currentSong, eqGains]);
+
+  useEffect(() => {
+    if (Capacitor.getPlatform() !== "android" || !currentSong) return;
+    AndroidPlayback.setRepeatMode({ repeatMode }).catch((error) => {
+      console.error("Unable to update Android repeat mode:", error);
+    });
+  }, [currentSong, repeatMode]);
+
+  useEffect(() => {
+    if (Capacitor.getPlatform() !== "android" || !currentSong) return;
+    AndroidPlayback.setShuffle({ shuffle: shuffleOn }).catch((error) => {
+      console.error("Unable to update Android shuffle:", error);
+    });
+  }, [currentSong, shuffleOn]);
 
   useEffect(() => {
     if (videoRef.current) videoRef.current.playbackRate = movieSpeed;
@@ -1740,6 +1963,13 @@ export default function MobileBulletproofPlayer() {
 
   useEffect(() => {
     isPlayingRef.current = isPlaying;
+    if (Capacitor.getPlatform() === "android") {
+      if (!currentSong) return;
+      AndroidPlayback.setPlaying({ playing: isPlaying }).catch((error) => {
+        console.error("Unable to update Android playback state:", error);
+      });
+      return;
+    }
     if (isPlaying) {
       if (sourceNodeRef.current || eqGainsRef.current.some((gain) => gain !== 0)) {
         latestEnsureAudioGraph.current();
@@ -1756,7 +1986,7 @@ export default function MobileBulletproofPlayer() {
     } else {
       audioRef.current?.pause();
     }
-  }, [isPlaying]);
+  }, [currentSong, isPlaying]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -1764,14 +1994,6 @@ export default function MobileBulletproofPlayer() {
       ? isPlaying ? "playing" : "paused"
       : "none";
   }, [currentSong, isPlaying]);
-
-  useEffect(() => {
-    if (!Capacitor.isNativePlatform()) return;
-    const active = Boolean(currentSong && isPlaying && screen !== "moviePlaying");
-    AndroidPlayback.setPlaybackActive({ active }).catch((error) => {
-      console.error("Unable to update Android background playback service:", error);
-    });
-  }, [currentSong, isPlaying, screen]);
 
   useEffect(() => {
     const orientation = screen === "moviePlaying" && movieFullscreen ? "landscape" : "portrait";
@@ -1809,6 +2031,11 @@ export default function MobileBulletproofPlayer() {
       navigator.mediaSession.setActionHandler("seekforward", null);
     };
 
+    if (Capacitor.getPlatform() === "android") {
+      clearMediaSession();
+      return clearMediaSession;
+    }
+
     if (!currentSong || screen === "moviePlaying") {
       clearMediaSession();
       return clearMediaSession;
@@ -1829,21 +2056,25 @@ export default function MobileBulletproofPlayer() {
     navigator.mediaSession.setActionHandler("nexttrack", () => latestNextSong.current());
     navigator.mediaSession.setActionHandler("seekto", (details) => {
       if (!audioRef.current || details.seekTime === undefined) return;
-      audioRef.current.currentTime = Math.max(0, Math.min(details.seekTime, audioRef.current.duration || details.seekTime));
+      seekAudioToRef.current(details.seekTime);
     });
     navigator.mediaSession.setActionHandler("seekbackward", (details) => {
-      if (!audioRef.current) return;
-      audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - (details.seekOffset ?? seekJumpSeconds));
+      const position = Capacitor.getPlatform() === "android"
+        ? currentTime
+        : audioRef.current?.currentTime ?? currentTime;
+      seekAudioToRef.current(Math.max(0, position - (details.seekOffset ?? seekJumpSeconds)));
     });
     navigator.mediaSession.setActionHandler("seekforward", (details) => {
-      if (!audioRef.current) return;
-      audioRef.current.currentTime = Math.min(
-        audioRef.current.duration || Infinity,
-        audioRef.current.currentTime + (details.seekOffset ?? seekJumpSeconds)
-      );
+      const position = Capacitor.getPlatform() === "android"
+        ? currentTime
+        : audioRef.current?.currentTime ?? currentTime;
+      seekAudioToRef.current(Math.min(
+        duration || Infinity,
+        position + (details.seekOffset ?? seekJumpSeconds)
+      ));
     });
     return clearMediaSession;
-  }, [currentSong, localSongs, currentIndex, screen, seekJumpSeconds]);
+  }, [currentSong, localSongs, currentIndex, screen, seekJumpSeconds, currentTime, duration]);
 
   // --- MENUS & UI LOGIC ---
   const menus = useMemo((): Record<string, Menu> => {
@@ -2706,7 +2937,7 @@ export default function MobileBulletproofPlayer() {
           failedNames.push(file.name);
           continue;
         }
-        importedSongs.push({
+        const importedSong: SongItem = {
           file,
           name: file.name.replace(/\.[^/.]+$/, ""),
           artworkUrl,
@@ -2715,7 +2946,9 @@ export default function MobileBulletproofPlayer() {
           importedAt: Date.now(),
           playCount: 0,
           lastPlayedAt: 0,
-        });
+        };
+        await syncNativeTrack(importedSong);
+        importedSongs.push(importedSong);
       } catch (error) {
         console.error(`Unable to import audio file "${file.name}":`, error);
         failedNames.push(file.name);
@@ -3028,8 +3261,7 @@ export default function MobileBulletproofPlayer() {
                 value={Math.min(unifiedCurrentTime, unifiedDuration || 0)}
                 onChange={(event) => {
                   const nextTime = Number(event.target.value);
-                  if (audioRef.current) audioRef.current.currentTime = nextTime;
-                  setCurrentTime(nextTime);
+                  seekAudioTo(nextTime);
                 }}
                 aria-label="Song progress"
                 className="min-w-0 flex-1 accent-white"
@@ -3743,12 +3975,15 @@ export default function MobileBulletproofPlayer() {
                     aria-valuetext={`${formatTime(unifiedCurrentTime)} of ${formatTime(unifiedDuration)}`}
                     tabIndex={0}
                     onKeyDown={(event) => {
-                      if (!audioRef.current || unifiedDuration <= 0) return;
+                      if (unifiedDuration <= 0) return;
                       const seekStep = seekJumpSeconds * (event.shiftKey ? 3 : 1);
+                      const position = Capacitor.getPlatform() === "android"
+                        ? unifiedCurrentTime
+                        : audioRef.current?.currentTime ?? unifiedCurrentTime;
                       const targetTime = event.key === "ArrowRight"
-                        ? Math.min(unifiedDuration, audioRef.current.currentTime + seekStep)
+                        ? Math.min(unifiedDuration, position + seekStep)
                         : event.key === "ArrowLeft"
-                        ? Math.max(0, audioRef.current.currentTime - seekStep)
+                        ? Math.max(0, position - seekStep)
                         : event.key === "Home"
                         ? 0
                         : event.key === "End"
@@ -3757,32 +3992,36 @@ export default function MobileBulletproofPlayer() {
                       if (targetTime === null) return;
                       event.preventDefault();
                       event.stopPropagation();
-                      audioRef.current.currentTime = targetTime;
-                      setCurrentTime(targetTime);
+                      seekAudioTo(targetTime);
                     }}
                     onPointerDown={(event) => {
                       event.stopPropagation();
-                      if (!audioRef.current || unifiedDuration <= 0) return;
+                      if (unifiedDuration <= 0) return;
                       const rect = event.currentTarget.getBoundingClientRect();
                       const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
                       const nextTime = ratio * unifiedDuration;
-                      audioRef.current.currentTime = nextTime;
-                      setCurrentTime(nextTime);
+                      seekPreviewRef.current = nextTime;
+                      if (Capacitor.getPlatform() === "android") setCurrentTime(nextTime);
+                      else seekAudioTo(nextTime);
                       event.currentTarget.setPointerCapture(event.pointerId);
                     }}
                     onPointerMove={(event) => {
                       event.stopPropagation();
                       if (!event.currentTarget.hasPointerCapture(event.pointerId)) return;
-                      if (!audioRef.current || unifiedDuration <= 0) return;
+                      if (unifiedDuration <= 0) return;
                       const rect = event.currentTarget.getBoundingClientRect();
                       const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
                       const nextTime = ratio * unifiedDuration;
-                      audioRef.current.currentTime = nextTime;
-                      setCurrentTime(nextTime);
+                      seekPreviewRef.current = nextTime;
+                      if (Capacitor.getPlatform() === "android") setCurrentTime(nextTime);
+                      else if (audioRef.current) audioRef.current.currentTime = nextTime;
                     }}
                     onPointerUp={(event) => {
                       event.stopPropagation();
                       if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+                        if (Capacitor.getPlatform() === "android") {
+                          seekAudioTo(seekPreviewRef.current);
+                        }
                         event.currentTarget.releasePointerCapture(event.pointerId);
                       }
                     }}
