@@ -83,7 +83,7 @@ public class MainActivity extends BridgeActivity {
     }
 
     @Override
-    protected void onDestroy() {
+    public void onDestroy() {
         if (getBridge() != null) {
             getBridge().getWebView().removeJavascriptInterface("RetroPodMedia");
         }

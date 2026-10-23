@@ -113,7 +113,7 @@ public class PlaybackKeepAliveService extends Service {
                         toggle
                 )
                 .addAction(android.R.drawable.ic_media_next, "Next", next)
-                .setStyle(new Notification.MediaStyle()
+                .setStyle(new NotificationCompat.MediaStyle()
                         .setMediaSession(mediaSession.getSessionToken())
                         .setShowActionsInCompactView(0, 1, 2))
                 .build();
