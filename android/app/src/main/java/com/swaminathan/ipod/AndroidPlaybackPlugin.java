@@ -84,7 +84,7 @@ public class AndroidPlaybackPlugin extends Plugin {
                 byte[] bytes = Base64.decode(chunk, Base64.DEFAULT);
                 try (FileOutputStream output = new FileOutputStream(temporary, !first)) {
                     output.write(bytes);
-                    output.getFD().sync();
+                    if (last) output.getFD().sync();
                 }
 
                 if (last) {
@@ -152,9 +152,12 @@ public class AndroidPlaybackPlugin extends Plugin {
                 call.reject("The playback queue is empty");
                 return;
             }
+            getContext().getSharedPreferences("native_playback", 0)
+                    .edit()
+                    .putString("pending_queue", parsed.toString())
+                    .apply();
             Intent intent = new Intent(getContext(), PlaybackKeepAliveService.class)
                     .setAction(PlaybackKeepAliveService.ACTION_SET_QUEUE)
-                    .putExtra(PlaybackKeepAliveService.EXTRA_QUEUE, tracks)
                     .putExtra(PlaybackKeepAliveService.EXTRA_INDEX, call.getInt("index", 0))
                     .putExtra(PlaybackKeepAliveService.EXTRA_REPEAT_START_INDEX,
                             call.getInt("repeatStartIndex", 0))

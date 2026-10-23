@@ -293,13 +293,14 @@ export default function MobileBulletproofPlayer() {
       for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
         const start = chunkIndex * chunkSize;
         const bytes = new Uint8Array(await song.file.slice(start, start + chunkSize).arrayBuffer());
-        let binary = "";
-        for (let offset = 0; offset < bytes.length; offset += 1) {
-          binary += String.fromCharCode(bytes[offset]);
+        const binaryParts: string[] = [];
+        const conversionChunkSize = 32 * 1024;
+        for (let offset = 0; offset < bytes.length; offset += conversionChunkSize) {
+          binaryParts.push(String.fromCharCode(...bytes.subarray(offset, offset + conversionChunkSize)));
         }
         await AndroidPlayback.appendTrackChunk({
           name: song.file.name,
-          chunk: btoa(binary),
+          chunk: btoa(binaryParts.join("")),
           first: chunkIndex === 0,
           last: chunkIndex === chunkCount - 1,
           size: song.file.size,
@@ -765,7 +766,7 @@ export default function MobileBulletproofPlayer() {
     }
 
     const orderedSongs = [song, ...queuedSongs, ...remainingSongs];
-    await syncNativeLibrary(orderedSongs);
+    await syncNativeTrack(song);
     await AndroidPlayback.setQueue({
       tracks: JSON.stringify(orderedSongs.map((item) => ({
         fileName: item.file.name,
@@ -780,6 +781,10 @@ export default function MobileBulletproofPlayer() {
       speed: playbackSpeed,
     });
     await AndroidPlayback.setEqualizer({ gains: JSON.stringify(eqGainsRef.current) });
+    void syncNativeLibrary(orderedSongs.slice(1)).catch((error) => {
+      console.error("Unable to prepare the rest of the Android playback queue:", error);
+      setImportNotice("Some queued tracks are still preparing for background playback.");
+    });
   };
 
   const playSong = (song: SongItem, index: number, playlistId: string | null = null, radioPlayback = false) => {
@@ -1472,7 +1477,7 @@ export default function MobileBulletproofPlayer() {
     }
     if (typeof state.position === "number" && Number.isFinite(state.position)) {
       const position = Math.max(0, state.position / 1000);
-      setCurrentTime(position);
+      if (screen === "nowPlaying") setCurrentTime(position);
       localStorage.setItem("retro_last_time", String(position));
     }
     if (typeof state.duration === "number" && Number.isFinite(state.duration)) {
@@ -1493,7 +1498,6 @@ export default function MobileBulletproofPlayer() {
       currentIndexRef.current = currentIndex;
       setCurrentIndex(currentIndex);
     }
-    setScreen("nowPlaying");
     const queued = queuedSongNamesRef.current.filter((name) => name !== song.file.name);
     if (queued.length !== queuedSongNamesRef.current.length) {
       queuedSongNamesRef.current = queued;
@@ -1533,6 +1537,15 @@ export default function MobileBulletproofPlayer() {
       console.error("Unable to restore Android playback state:", error);
     });
   }, [songsLoaded]);
+
+  useEffect(() => {
+    if (screen !== "nowPlaying" || Capacitor.getPlatform() !== "android") return;
+    AndroidPlayback.queryState().then((state) => {
+      applyNativePlaybackStateRef.current(state);
+    }).catch((error) => {
+      console.error("Unable to refresh Android playback state:", error);
+    });
+  }, [screen]);
 
   // --- INITIALIZATION EFFECTS ---
   useEffect(() => {
@@ -1654,7 +1667,10 @@ export default function MobileBulletproofPlayer() {
     const updateClock = () => {
       const now = new Date();
       setCurrentTimeStr(now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: !clock24hRef.current }));
+    };
 
+    let persistenceTick = 0;
+    const updateSleepTimer = () => {
       const endAt = sleepTimerEndAtRef.current;
       if (endAt !== null) {
         const remaining = endAt - Date.now();
@@ -1672,12 +1688,15 @@ export default function MobileBulletproofPlayer() {
         }
       }
 
-      if (resumePlaybackEnabledRef.current && audioRef.current && !audioRef.current.paused) {
+      persistenceTick += 1;
+      if (persistenceTick % 5 === 0 && resumePlaybackEnabledRef.current && audioRef.current && !audioRef.current.paused) {
         localStorage.setItem("retro_last_time", audioRef.current.currentTime.toString());
       }
     };
     updateClock();
-    const clockInterval = setInterval(updateClock, 1000);
+    updateSleepTimer();
+    const clockInterval = setInterval(updateClock, 60_000);
+    const sleepTimerInterval = setInterval(updateSleepTimer, 1000);
 
     if (!audioRef.current) {
       audioRef.current = new Audio();
@@ -1754,6 +1773,7 @@ export default function MobileBulletproofPlayer() {
     return () => {
       cancelled = true;
       clearInterval(clockInterval);
+      clearInterval(sleepTimerInterval);
       audio.removeEventListener("timeupdate", handleTimeUpdate);
       audio.removeEventListener("volumechange", handleVolume);
       audio.removeEventListener("loadedmetadata", handleLoadedMetadata);
@@ -2964,7 +2984,6 @@ export default function MobileBulletproofPlayer() {
           playCount: 0,
           lastPlayedAt: 0,
         };
-        await syncNativeTrack(importedSong);
         importedSongs.push(importedSong);
       } catch (error) {
         console.error(`Unable to import audio file "${file.name}":`, error);
@@ -2975,6 +2994,12 @@ export default function MobileBulletproofPlayer() {
     if (importedSongs.length > 0) {
       setLocalSongs((previous) => [...previous, ...importedSongs]);
       localSongsRef.current = [...localSongsRef.current, ...importedSongs];
+      if (Capacitor.getPlatform() === "android") {
+        void syncNativeLibrary(importedSongs).catch((error) => {
+          console.error("Unable to prepare imported tracks for Android playback:", error);
+          setImportNotice("Songs imported, but Android is still preparing background copies.");
+        });
+      }
     }
     const noticeParts = [
       importedSongs.length ? `Imported ${importedSongs.length} song(s).` : "",

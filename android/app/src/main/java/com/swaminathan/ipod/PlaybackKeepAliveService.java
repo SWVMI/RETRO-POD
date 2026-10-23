@@ -203,7 +203,11 @@ public class PlaybackKeepAliveService extends Service {
 
     private void setQueue(Intent intent) {
         try {
-            JSONArray tracks = new JSONArray(intent.getStringExtra(EXTRA_QUEUE));
+            android.content.SharedPreferences preferences = getSharedPreferences(PREFERENCES, MODE_PRIVATE);
+            String requestedQueue = intent.getStringExtra(EXTRA_QUEUE);
+            if (requestedQueue == null) requestedQueue = preferences.getString("pending_queue", "[]");
+            JSONArray tracks = new JSONArray(requestedQueue);
+            preferences.edit().remove("pending_queue").apply();
             queue.clear();
             for (int i = 0; i < tracks.length(); i++) queue.add(tracks.getJSONObject(i));
             if (queue.isEmpty()) {
