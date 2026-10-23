@@ -12,12 +12,12 @@ import android.graphics.BitmapFactory;
 import android.os.Build;
 import android.os.IBinder;
 import android.os.PowerManager;
-import android.media.MediaMetadata;
-import android.media.session.MediaSession;
-import android.media.session.PlaybackState;
 import android.util.Base64;
 
 import androidx.core.app.NotificationCompat;
+import android.support.v4.media.MediaMetadataCompat;
+import android.support.v4.media.session.MediaSessionCompat;
+import android.support.v4.media.session.PlaybackStateCompat;
 
 public class PlaybackKeepAliveService extends Service {
     static final String ACTION_UPDATE = "com.swaminathan.ipod.UPDATE_PLAYBACK_NOTIFICATION";
@@ -30,7 +30,7 @@ public class PlaybackKeepAliveService extends Service {
     private static final int NOTIFICATION_ID = 1042;
 
     private PowerManager.WakeLock wakeLock;
-    private MediaSession mediaSession;
+    private MediaSessionCompat mediaSession;
     private String title = "RetroPod";
     private String artist = "";
     private String album = "";
@@ -41,8 +41,8 @@ public class PlaybackKeepAliveService extends Service {
     public void onCreate() {
         super.onCreate();
         createNotificationChannel();
-        mediaSession = new MediaSession(this, "RetroPod");
-        mediaSession.setCallback(new MediaSession.Callback() {
+        mediaSession = new MediaSessionCompat(this, "RetroPod");
+        mediaSession.setCallback(new MediaSessionCompat.Callback() {
             @Override
             public void onPlay() {
                 handleAction("play");
@@ -64,7 +64,7 @@ public class PlaybackKeepAliveService extends Service {
             }
         });
         mediaSession.setFlags(
-                MediaSession.FLAG_HANDLES_MEDIA_BUTTONS | MediaSession.FLAG_HANDLES_TRANSPORT_CONTROLS
+                MediaSessionCompat.FLAG_HANDLES_MEDIA_BUTTONS | MediaSessionCompat.FLAG_HANDLES_TRANSPORT_CONTROLS
         );
         mediaSession.setActive(true);
     }
@@ -141,23 +141,23 @@ public class PlaybackKeepAliveService extends Service {
     }
 
     private void updateMediaSession() {
-        MediaMetadata.Builder metadata = new MediaMetadata.Builder()
-                .putString(MediaMetadata.METADATA_KEY_TITLE, title)
-                .putString(MediaMetadata.METADATA_KEY_ARTIST, artist)
-                .putString(MediaMetadata.METADATA_KEY_ALBUM, album);
+        MediaMetadataCompat.Builder metadata = new MediaMetadataCompat.Builder()
+                .putString(MediaMetadataCompat.METADATA_KEY_TITLE, title)
+                .putString(MediaMetadataCompat.METADATA_KEY_ARTIST, artist)
+                .putString(MediaMetadataCompat.METADATA_KEY_ALBUM, album);
         if (artwork != null) {
-            metadata.putBitmap(MediaMetadata.METADATA_KEY_ART, artwork);
-            metadata.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, artwork);
+            metadata.putBitmap(MediaMetadataCompat.METADATA_KEY_ART, artwork);
+            metadata.putBitmap(MediaMetadataCompat.METADATA_KEY_ALBUM_ART, artwork);
         }
         mediaSession.setMetadata(metadata.build());
-        long actions = PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PAUSE
-                | PlaybackState.ACTION_PLAY_PAUSE | PlaybackState.ACTION_SKIP_TO_PREVIOUS
-                | PlaybackState.ACTION_SKIP_TO_NEXT;
-        PlaybackState state = new PlaybackState.Builder()
+        long actions = PlaybackStateCompat.ACTION_PLAY | PlaybackStateCompat.ACTION_PAUSE
+                | PlaybackStateCompat.ACTION_PLAY_PAUSE | PlaybackStateCompat.ACTION_SKIP_TO_PREVIOUS
+                | PlaybackStateCompat.ACTION_SKIP_TO_NEXT;
+        PlaybackStateCompat state = new PlaybackStateCompat.Builder()
                 .setActions(actions)
                 .setState(
-                        playing ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
-                        PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                        playing ? PlaybackStateCompat.STATE_PLAYING : PlaybackStateCompat.STATE_PAUSED,
+                        PlaybackStateCompat.PLAYBACK_POSITION_UNKNOWN,
                         playing ? 1.0f : 0.0f
                 )
                 .build();
