@@ -41,8 +41,9 @@ public class AndroidPlaybackPlugin extends Plugin {
         long expectedModified = call.getData().optLong("lastModified", -1L);
         fileExecutor.execute(() -> {
             try {
-                JSONObject metadata = getContext().getSharedPreferences("native_music", 0)
-                        .getJSONObject("track_" + trackKey(name), new JSONObject());
+                String storedMetadata = getContext().getSharedPreferences("native_music", 0)
+                        .getString("track_" + trackKey(name), "{}");
+                JSONObject metadata = new JSONObject(storedMetadata);
                 File trackFile = trackFile(name);
                 boolean matches = trackFile.isFile()
                         && trackFile.length() == expectedSize
