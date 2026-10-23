@@ -1,0 +1,26 @@
+{
+  "id": "./",
+  "name": "RetroPod",
+  "short_name": "RetroPod",
+  "description": "A local music player with an iPod-inspired interface.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#090A0C",
+  "theme_color": "#1C1C1E",
+  "icons": [
+    {
+      "src": "./retro-pod-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./retro-pod-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

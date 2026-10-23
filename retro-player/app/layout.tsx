@@ -16,6 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "RetroPod",
   description: "A local music player with an iPod-inspired interface.",
+  manifest: "./manifest.webmanifest",
 };
 
 export const viewport: Viewport = {

@@ -1,8 +1,13 @@
 package com.swaminathan.ipod;
 
 import android.webkit.JavascriptInterface;
+import android.Manifest;
 import android.os.Bundle;
+import android.os.Build;
+import android.content.pm.PackageManager;
+import android.util.Log;
 
+import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -22,8 +27,21 @@ public class MainActivity extends BridgeActivity {
         super.onCreate(savedInstanceState);
         instance = this;
         getBridge().getWebView().addJavascriptInterface(new PlaybackMetadataBridge(), "RetroPodMedia");
+        requestNotificationPermission();
         setRequestedOrientation(android.content.pm.ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
         goImmersive();
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(
+                    this,
+                    new String[] { Manifest.permission.POST_NOTIFICATIONS },
+                    1001
+            );
+        }
     }
 
     synchronized void syncPlaybackNotification() {
@@ -59,22 +77,10 @@ public class MainActivity extends BridgeActivity {
     public static void dispatchMediaAction(String action) {
         MainActivity activity = instance;
         if (activity == null || activity.getBridge() == null) return;
-
-        String selector;
-        if ("previous".equals(action)) {
-            selector = "button[aria-label='Previous song']";
-        } else if ("next".equals(action)) {
-            selector = "button[aria-label='Next song']";
-        } else if ("play".equals(action)) {
-            selector = "button[aria-label='Play song'],button[aria-label='Resume playback']";
-        } else if ("pause".equals(action)) {
-            selector = "button[aria-label='Pause song'],button[aria-label='Pause playback']";
-        } else {
-            return;
-        }
-
-        String script = "(function(){var b=document.querySelector(\"" + selector + "\");"
-                + "if(!b||b.disabled)return false;b.click();return true;})()";
+        if (!"previous".equals(action) && !"next".equals(action)
+                && !"play".equals(action) && !"pause".equals(action)) return;
+        String script = "window.dispatchEvent(new CustomEvent('retropod-media-action',{detail:'"
+                + action + "'}));";
         activity.runOnUiThread(() -> {
             if (activity.getBridge() != null) {
                 activity.getBridge().getWebView().evaluateJavascript(script, null);
@@ -115,7 +121,8 @@ public class MainActivity extends BridgeActivity {
                 intent.putExtra(PlaybackKeepAliveService.EXTRA_PLAYING, metadata.optBoolean("playing", false));
                 intent.putExtra(PlaybackKeepAliveService.EXTRA_ARTWORK, metadata.optString("artwork"));
                 ContextCompat.startForegroundService(MainActivity.this, intent);
-            } catch (Exception ignored) {
+            } catch (Exception error) {
+                Log.e("RetroPod", "Unable to update playback notification metadata", error);
                 stopService(new android.content.Intent(
                         MainActivity.this, PlaybackKeepAliveService.class
                 ));

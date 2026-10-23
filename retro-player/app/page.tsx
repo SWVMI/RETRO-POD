@@ -228,6 +228,13 @@ export default function MobileBulletproofPlayer() {
       if (!AudioContextConstructor) throw new Error("Web Audio is not supported.");
       const ctx = new AudioContextConstructor();
       audioCtxRef.current = ctx;
+      ctx.addEventListener("statechange", () => {
+        if (ctx.state === "suspended" && isPlayingRef.current) {
+          ctx.resume().catch((error) => {
+            console.error("Unable to resume the equalizer audio graph:", error);
+          });
+        }
+      });
       
       const source = ctx.createMediaElementSource(audioRef.current);
       sourceNodeRef.current = source;
@@ -690,6 +697,7 @@ export default function MobileBulletproofPlayer() {
         console.error("Local playback failed:", error);
         isPlayingRef.current = false;
         setIsPlaying(false);
+        setImportNotice(`Could not play "${song.name}". Tap Play to try again.`);
       });
     } else {
       isPlayingRef.current = true;
@@ -1238,6 +1246,7 @@ export default function MobileBulletproofPlayer() {
           if (requestId !== playbackRequestRef.current) return;
           console.error("Unable to repeat the current track:", error);
           setIsPlaying(false);
+          setImportNotice("The track could not restart. Tap Play to try again.");
         });
       }
       return;
@@ -1304,10 +1313,28 @@ export default function MobileBulletproofPlayer() {
     latestEnsureAudioGraph.current = ensureAudioGraph;
   });
 
+  useEffect(() => {
+    const handleMediaAction = (event: Event) => {
+      const action = (event as CustomEvent<unknown>).detail;
+      if (action === "play") {
+        wakeUpAudioCtx();
+        setIsPlaying(true);
+      } else if (action === "pause") {
+        setIsPlaying(false);
+      } else if (action === "previous") {
+        latestPrevSong.current();
+      } else if (action === "next") {
+        latestNextSong.current();
+      }
+    };
+
+    window.addEventListener("retropod-media-action", handleMediaAction);
+    return () => window.removeEventListener("retropod-media-action", handleMediaAction);
+  }, []);
+
   // --- INITIALIZATION EFFECTS ---
   useEffect(() => {
-    const hasSeenOnboard = localStorage.getItem("retro_onboarded");
-    if (!hasSeenOnboard) setShowOnboarding(true);
+    setShowOnboarding(true);
 
     const savedTheme = localStorage.getItem("retro_theme");
     if (savedTheme && lcdThemes.some((theme) => theme === savedTheme)) {
@@ -1713,20 +1740,30 @@ export default function MobileBulletproofPlayer() {
 
   useEffect(() => {
     isPlayingRef.current = isPlaying;
-    if ("mediaSession" in navigator) {
-      navigator.mediaSession.playbackState = isPlaying ? "playing" : "paused";
-    }
-
     if (isPlaying) {
       if (sourceNodeRef.current || eqGainsRef.current.some((gain) => gain !== 0)) {
         latestEnsureAudioGraph.current();
         wakeUpAudioCtx();
       }
-      audioRef.current?.play().catch(e => console.log("Playback prevented:", e));
+      const requestId = playbackRequestRef.current;
+      audioRef.current?.play().catch((error) => {
+        if (requestId !== playbackRequestRef.current) return;
+        console.error("Playback could not resume:", error);
+        isPlayingRef.current = false;
+        setIsPlaying(false);
+        setImportNotice("Playback could not resume. Tap Play to try again.");
+      });
     } else {
       audioRef.current?.pause();
     }
   }, [isPlaying]);
+
+  useEffect(() => {
+    if (!("mediaSession" in navigator)) return;
+    navigator.mediaSession.playbackState = currentSong
+      ? isPlaying ? "playing" : "paused"
+      : "none";
+  }, [currentSong, isPlaying]);
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -3125,7 +3162,7 @@ export default function MobileBulletproofPlayer() {
             <div className="overflow-y-auto flex-1 pr-2 space-y-2 text-left text-sm text-gray-300 custom-scrollbar pb-4">
               <p className="mb-2 text-xs leading-relaxed text-gray-400">Open a section to see its controls. RetroPod plays files stored in your local library; it does not stream songs.</p>
 
-              <details open className="group rounded-xl border border-white/10 bg-black/20 px-3">
+              <details className="group rounded-xl border border-white/10 bg-black/20 px-3">
                 <summary className="cursor-pointer list-none py-3 text-xs font-bold uppercase tracking-wider text-blue-300 [&::-webkit-details-marker]:hidden">🧭 Navigation &amp; Library</summary>
                 <ul className="space-y-2 pb-3 text-xs leading-relaxed">
                   <li>• <b>Trackpad:</b> Drag in circles to move through menus and lists. You can also tap list items directly.</li>
@@ -3195,7 +3232,6 @@ export default function MobileBulletproofPlayer() {
               <button 
                 onClick={() => {
                   setShowOnboarding(false);
-                  localStorage.setItem("retro_onboarded", "true");
                 }}
                 className="w-full py-3 bg-white text-black hover:bg-gray-200 font-bold rounded-xl text-xs uppercase tracking-widest shadow-lg transition-colors cursor-pointer"
               >
