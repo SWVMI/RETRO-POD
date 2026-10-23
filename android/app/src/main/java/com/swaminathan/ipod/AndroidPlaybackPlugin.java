@@ -188,7 +188,12 @@ public class AndroidPlaybackPlugin extends Plugin {
 
     @PluginMethod
     public void seekTo(PluginCall call) {
-        double position = call.getDouble("position", 0d);
+        Double requestedPosition = call.getDouble("position");
+        if (requestedPosition == null || !Double.isFinite(requestedPosition) || requestedPosition < 0) {
+            call.reject("A non-negative seek position is required");
+            return;
+        }
+        long position = Math.round(requestedPosition);
         Intent intent = serviceIntent(PlaybackKeepAliveService.ACTION_SEEK)
                 .putExtra(PlaybackKeepAliveService.EXTRA_POSITION, position);
         startService(intent, call);
@@ -255,6 +260,8 @@ public class AndroidPlaybackPlugin extends Plugin {
             result.put("position", preferences.getLong("position", 0L));
             result.put("duration", preferences.getLong("duration", 0L));
             result.put("index", index);
+            result.put("sleepTimerEndAt", preferences.getLong("sleepTimerEndAt", 0L));
+            result.put("sleepFadeEnabled", preferences.getBoolean("sleepFadeEnabled", true));
             call.resolve(result);
         } catch (JSONException error) {
             call.reject("Unable to read Android playback state", error);

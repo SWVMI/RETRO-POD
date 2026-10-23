@@ -44,6 +44,8 @@ interface AndroidPlaybackPlugin {
     position: number;
     duration: number;
     index: number;
+    sleepTimerEndAt: number;
+    sleepFadeEnabled: boolean;
   }>;
   setOrientation(options: { orientation: "portrait" | "landscape" }): Promise<void>;
 }

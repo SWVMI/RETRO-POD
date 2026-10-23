@@ -25,7 +25,9 @@ public class MediaActionReceiver extends BroadcastReceiver {
         }
         ContextCompat.startForegroundService(
                 context,
-                new Intent(context, PlaybackKeepAliveService.class).setAction(serviceAction)
+                new Intent(context, PlaybackKeepAliveService.class)
+                        .setAction(serviceAction)
+                        .putExtra(PlaybackKeepAliveService.EXTRA_START_FOREGROUND, true)
         );
     }
 }

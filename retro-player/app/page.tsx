@@ -149,6 +149,7 @@ export default function MobileBulletproofPlayer() {
   const [movies, setMovies] = useState<MovieItem[]>([]);
   const [libraryPreferencesLoaded, setLibraryPreferencesLoaded] = useState(false);
   const [songsLoaded, setSongsLoaded] = useState(false);
+  const [nativePlaybackStateLoaded, setNativePlaybackStateLoaded] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -332,13 +333,14 @@ export default function MobileBulletproofPlayer() {
   };
 
   const seekAudioTo = (position: number) => {
-    const audioDuration = audioRef.current?.duration;
+    const isAndroidPlayback = Capacitor.getPlatform() === "android";
+    const audioDuration = isAndroidPlayback ? duration : audioRef.current?.duration;
     const maximum = Number.isFinite(audioDuration) && audioDuration
       ? audioDuration
       : duration;
     const boundedPosition = Math.max(0, Math.min(position, maximum || position));
     setCurrentTime(boundedPosition);
-    if (Capacitor.getPlatform() === "android") {
+    if (isAndroidPlayback) {
       AndroidPlayback.seekTo({ position: Math.round(boundedPosition * 1000) }).catch((error) => {
         console.error("Unable to seek Android playback:", error);
         setImportNotice("The track could not seek to that position.");
@@ -1461,6 +1463,8 @@ export default function MobileBulletproofPlayer() {
     playing?: boolean;
     position?: number;
     duration?: number;
+    sleepTimerEndAt?: number;
+    sleepFadeEnabled?: boolean;
   }) => {
     if (typeof state.playing === "boolean") {
       isPlayingRef.current = state.playing;
@@ -1473,6 +1477,12 @@ export default function MobileBulletproofPlayer() {
     }
     if (typeof state.duration === "number" && Number.isFinite(state.duration)) {
       setDuration(Math.max(0, state.duration / 1000));
+    }
+    if (typeof state.sleepTimerEndAt === "number" && Number.isFinite(state.sleepTimerEndAt)) {
+      setSleepTimerEndAt(state.sleepTimerEndAt > 0 ? state.sleepTimerEndAt : null);
+    }
+    if (typeof state.sleepFadeEnabled === "boolean") {
+      setSleepFadeEnabled(state.sleepFadeEnabled);
     }
     if (!state.fileName) return;
     const song = localSongsRef.current.find((item) => item.file.name === state.fileName);
@@ -1501,6 +1511,8 @@ export default function MobileBulletproofPlayer() {
         playing?: boolean;
         position?: number;
         duration?: number;
+        sleepTimerEndAt?: number;
+        sleepFadeEnabled?: boolean;
       }>).detail;
       applyNativePlaybackStateRef.current(state);
     };
@@ -1509,9 +1521,14 @@ export default function MobileBulletproofPlayer() {
   }, []);
 
   useEffect(() => {
-    if (!songsLoaded || Capacitor.getPlatform() !== "android") return;
+    if (Capacitor.getPlatform() !== "android") {
+      setNativePlaybackStateLoaded(true);
+      return;
+    }
+    if (!songsLoaded) return;
     AndroidPlayback.queryState().then((state) => {
       applyNativePlaybackStateRef.current(state);
+      setNativePlaybackStateLoaded(true);
     }).catch((error) => {
       console.error("Unable to restore Android playback state:", error);
     });
@@ -1776,7 +1793,7 @@ export default function MobileBulletproofPlayer() {
   useEffect(() => { localStorage.setItem("retro_seek_jump", String(seekJumpSeconds)); }, [seekJumpSeconds]);
   useEffect(() => { localStorage.setItem("retro_sleep_fade", String(sleepFadeEnabled)); }, [sleepFadeEnabled]);
   useEffect(() => {
-    if (Capacitor.getPlatform() !== "android") return;
+    if (Capacitor.getPlatform() !== "android" || !nativePlaybackStateLoaded) return;
     AndroidPlayback.setSleepTimer({
       endAt: sleepTimerEndAt ?? 0,
       fade: sleepFadeEnabled,
@@ -1784,7 +1801,7 @@ export default function MobileBulletproofPlayer() {
       console.error("Unable to synchronize Android sleep timer:", error);
       setImportNotice("The Android sleep timer could not be updated.");
     });
-  }, [sleepTimerEndAt, sleepFadeEnabled]);
+  }, [sleepTimerEndAt, sleepFadeEnabled, nativePlaybackStateLoaded]);
   useEffect(() => { localStorage.setItem("retro_large_text", String(largeTextEnabled)); }, [largeTextEnabled]);
   useEffect(() => { localStorage.setItem("retro_high_contrast", String(highContrastEnabled)); }, [highContrastEnabled]);
   useEffect(() => { localStorage.setItem("retro_reduced_motion", String(reducedMotionEnabled)); }, [reducedMotionEnabled]);

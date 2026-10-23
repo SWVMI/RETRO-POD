@@ -58,6 +58,7 @@ public class PlaybackKeepAliveService extends Service {
     static final String EXTRA_SHUFFLE = "shuffle";
     static final String EXTRA_SLEEP_END_AT = "sleepEndAt";
     static final String EXTRA_SLEEP_FADE = "sleepFade";
+    static final String EXTRA_START_FOREGROUND = "startForeground";
     private static final String CHANNEL_ID = "retropod_playback";
     private static final int NOTIFICATION_ID = 1042;
     private static final String PREFERENCES = "native_playback";
@@ -147,6 +148,10 @@ public class PlaybackKeepAliveService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? null : intent.getAction();
+        if (intent != null && intent.getBooleanExtra(EXTRA_START_FOREGROUND, false)) {
+            if (mediaSession != null) mediaSession.setActive(true);
+            showForeground(buildNotification());
+        }
         if (ACTION_SET_QUEUE.equals(action)) {
             setQueue(intent);
         } else if (ACTION_PLAY.equals(action)) {
@@ -177,6 +182,7 @@ public class PlaybackKeepAliveService extends Service {
             handler.removeCallbacks(sleepTimerUpdater);
             if (sleepTimerEndAt > 0) handler.post(sleepTimerUpdater);
             persistState();
+            publishState();
         } else if (ACTION_QUERY.equals(action)) {
             publishState();
             return START_NOT_STICKY;
@@ -660,6 +666,8 @@ public class PlaybackKeepAliveService extends Service {
             state.put("position", player != null && prepared ? player.getCurrentPosition() : pendingPosition);
             state.put("duration", player != null && prepared ? player.getDuration() : current.optLong("duration", 0));
             state.put("index", index);
+            state.put("sleepTimerEndAt", sleepTimerEndAt);
+            state.put("sleepFadeEnabled", sleepFadeEnabled);
         } catch (JSONException error) {
             Log.e("RetroPod", "Unable to publish playback state", error);
         }
